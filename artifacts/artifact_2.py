@@ -1,0 +1,1 @@
+print([p for p in range(2, 101) if all(p % i != 0 for i in range(2, int(p**0.5) + 1))])
