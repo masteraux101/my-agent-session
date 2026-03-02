@@ -1,0 +1,40 @@
+name: Elon Musk Daily Newsletter
+on:
+  schedule:
+    - cron: "38 4 * * *" # 北京时间 12:38
+  workflow_dispatch:
+jobs:
+  run-summary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Summary
+        id: ai
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python3 ai-musk-digest-script.py > summary.txt
+      - name: Send Email via Resend
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          TARGET_EMAIL: "768471488@qq.com"
+        run: |
+          CONTENT=$(cat summary.txt)
+          JSON_DATA=$(python3 -c "
+          import sys, json
+          content = sys.stdin.read()
+          html = '<div style=\"font-family:sans-serif;line-height:1.6;\">' + content.replace('\n', '<br>') + '</div>'
+          print(json.dumps({
+              'from': 'Musk-Bot <onboarding@resend.dev>',
+              'to': ['$TARGET_EMAIL'],
+              'subject': '马斯克每日动态简报 - ' + '$(date +%Y-%m-%d)',
+              'html': html
+          }))
+          " <<EOF
+          $CONTENT
+          EOF
+          )
+          curl -X POST https://api.resend.com/emails \
+            -H "Authorization: Bearer $RESEND_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$JSON_DATA"
