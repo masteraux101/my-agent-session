@@ -13,7 +13,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          python3 ai-musk-digest-script.py > summary.txt
+          python3 artifacts/ai-musk-digest-script.py > summary.txt
       - name: Send Email via Resend
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
