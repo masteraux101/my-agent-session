@@ -1,0 +1,46 @@
+# browseragent-watchdog: lt-mmabwgfp-k4d5
+name: "Watchdog: lt-mmabwgfp-k4d5"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'Task ID to monitor'
+        required: false
+        default: 'lt-mmabwgfp-k4d5'
+      target_workflow:
+        description: 'Target workflow file'
+        required: false
+        default: 'longtask-lt-mmabwgfp-k4d5.yml'
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.BA_ACCESS_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install cryptography google-genai
+
+      - name: Run watchdog
+        env:
+          GITHUB_TOKEN: ${{ secrets.BA_ACCESS_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL: "gemini-3-flash-preview"
+          REPO_FULL: ${{ github.repository }}
+          TASK_ID: "${{ inputs.task_id || 'lt-mmabwgfp-k4d5' }}"
+          TARGET_WORKFLOW: "${{ inputs.target_workflow || 'longtask-lt-mmabwgfp-k4d5.yml' }}"
+          WATCHDOG_WORKFLOW: "watchdog-lt-mmabwgfp-k4d5.yml"
+          LONGTASK_KEY: ${{ secrets.LONGTASK_KEY }}
+          MAX_RETRIES: "3"
+          POLL_INTERVAL: "30"
+          MAX_RUNTIME_MINUTES: "340"
+        run: python -u scripts/longtask-watchdog.py

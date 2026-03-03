@@ -337,9 +337,8 @@ def call_model(prompt, system_instruction=None, retries=None, state=None):
     if not GEMINI_API_KEY:
         print("[eval] No GEMINI_API_KEY — skipping AI evaluation")
         return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={GEMINI_API_KEY}"
 
-    def build_body(history_enabled=True):
+    def build_contents(history_enabled=True):
         if history_enabled and state is not None:
             session = ensure_model_session(state)
             history = session.get("messages", [])[-(MODEL_SESSION_MAX_MESSAGES * 2):]
@@ -347,43 +346,39 @@ def call_model(prompt, system_instruction=None, retries=None, state=None):
             contents.append({"role": "user", "parts": [{"text": _trim_text(prompt)}]})
         else:
             contents = [{"role": "user", "parts": [{"text": _trim_text(prompt)}]}]
-
-        body_obj = {"contents": contents}
-        if system_instruction:
-            body_obj["systemInstruction"] = {"parts": [{"text": _trim_text(system_instruction, 8000)}]}
-        body_obj["generationConfig"] = {"temperature": 0.3, "maxOutputTokens": 4096}
-        return body_obj
+        return contents
 
     for attempt in range(retries):
         try:
-            body = build_body(history_enabled=use_history)
-            data = json.dumps(body).encode()
-            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                result = json.loads(resp.read().decode())
-                text = (result.get("candidates", [{}])[0]
-                        .get("content", {})
-                        .get("parts", [{}])[0]
-                        .get("text", ""))
-                if text and state is not None:
-                    _append_session_turn(state, "user", prompt, "watchdog")
-                    _append_session_turn(state, "model", text, "model")
-                return text
-        except urllib.error.HTTPError as e:
-            code = getattr(e, "code", None)
-            detail = ""
-            try:
-                detail = e.read().decode(errors="ignore")[:500]
-            except Exception:
-                pass
-            print(f"[eval] Model call attempt {attempt+1}/{retries} failed: HTTP {code} {detail}")
+            client = get_genai_client()
+            contents = build_contents(history_enabled=use_history)
+            config = {
+                "temperature": 0.3,
+                "max_output_tokens": 4096,
+            }
+            if system_instruction:
+                config["system_instruction"] = _trim_text(system_instruction, 8000)
 
-            if code == 400 and use_history:
+            resp = client.models.generate_content(
+                model=MODEL,
+                contents=contents,
+                config=config,
+            )
+            text = extract_text_from_genai_response(resp)
+            if text and state is not None:
+                _append_session_turn(state, "user", prompt, "watchdog")
+                _append_session_turn(state, "model", text, "model")
+            return text
+        except Exception as e:
+            code = getattr(e, "status_code", None)
+            detail = str(e)[:500]
+            print(f"[eval] Model call attempt {attempt+1}/{retries} failed: {detail}")
+
+            if (code == 400 or "400" in detail) and use_history:
                 print("[eval] HTTP 400 with session history. Falling back to single-turn request.")
                 use_history = False
                 continue
-        except Exception as e:
-            print(f"[eval] Model call attempt {attempt+1}/{retries} failed: {e}")
+
             if attempt < retries - 1:
                 backoff = MODEL_RETRY_BASE_SECONDS * (2 ** attempt)
                 jitter = (attempt + 1) * 0.5
@@ -483,6 +478,7 @@ def evaluate_runner_output(state):
             pass
 
     print(f"[eval] Could not parse evaluation response — defaulting to pass")
+    print(f"[eval] Raw response (first 1500 chars): {response[:1500]}")
     return {"verdict": "pass", "issues": [], "suggestions": ""}
 
 def build_revised_task_prompt(state, revised_prompt, suggestions, issues):
@@ -509,6 +505,40 @@ def build_revised_task_prompt(state, revised_prompt, suggestions, issues):
         f"{deliverable_lines}\n"
     )
     return base_prompt + guidance_block
+
+
+_GENAI_CLIENT = None
+
+
+def get_genai_client():
+    global _GENAI_CLIENT
+    if _GENAI_CLIENT is not None:
+        return _GENAI_CLIENT
+
+    from google import genai as google_genai
+    _GENAI_CLIENT = google_genai.Client(api_key=GEMINI_API_KEY)
+    return _GENAI_CLIENT
+
+
+def extract_text_from_genai_response(resp):
+    text = getattr(resp, "text", None)
+    if text:
+        return text
+
+    candidates = getattr(resp, "candidates", None) or []
+    for cand in candidates:
+        content = getattr(cand, "content", None)
+        if not content:
+            continue
+        parts = getattr(content, "parts", None) or []
+        buf = []
+        for p in parts:
+            t = getattr(p, "text", None)
+            if t:
+                buf.append(t)
+        if buf:
+            return "\n".join(buf)
+    return ""
 
 # ── Main watchdog loop ──────────────────────────────────────────────
 
