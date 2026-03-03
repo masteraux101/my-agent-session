@@ -1,0 +1,6 @@
+[2026-02-15 10:22:30] INFO: Q# Interpreter initialized (Modern QDK).
+[2026-02-15 10:22:30] DEBUG: Compiling BellState.qs...
+[2026-02-15 10:22:31] INFO: Program compiled successfully (0.12s).
+[2026-02-15 10:22:31] INFO: Executing on 'SparseSimulator'...
+[2026-02-15 10:22:31] SUCCESS: Output: [Zero, Zero]: 502, [One, One]: 498
+[2026-02-15 10:22:32] ERROR: (Minor) Runtime warning: Azure Quantum workspace credentials not found, defaulting to local simulation.
