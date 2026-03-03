@@ -1,18 +1,17 @@
-# Quantum Bell State Comparison (2026 Update)
+# Quantum Frameworks 2026 Evaluation
 
-This repository contains benchmarking scripts and analysis for the three major quantum programming frameworks as of 2026.
+This repository contains a comparative study and functional tests for the leading quantum computing frameworks as of 2026 (based on Qiskit 1.x, Cirq 1.x, and Modern QDK standards).
 
-## Contents
-- `/scripts`: Source code for Qiskit, Cirq, and Q#.
-- `/logs`: Execution logs and error reports.
-- `/analysis`: Detailed documentation and GitHub activity reports.
+## Repository Structure
+- `/scripts`: Source code for Bell State generation.
+- `/analysis`: Detailed reports on documentation, GitHub activity, and error rates.
+- `/logs`: Execution logs from local tests.
 
-## Quick Start
-1. **Qiskit**: `pip install qiskit qiskit-aer`
-2. **Cirq**: `pip install cirq`
-3. **Q#**: `pip install qsharp` (Requires .NET SDK for the Modern QDK)
+## Framework Documentation Links
+- **Qiskit 1.x+**: [https://docs.quantum.ibm.com/](https://docs.quantum.ibm.com/)
+- **Cirq**: [https://quantumai.google/cirq](https://quantumai.google/cirq)
+- **Q# (Modern QDK)**: [https://learn.microsoft.com/en-us/azure/quantum/](https://learn.microsoft.com/en-us/azure/quantum/)
 
-## Key Findings
-- Qiskit has successfully transitioned to a "Primitive-first" architecture.
-- Q# is now fully integrated into the Python ecosystem via the Modern QDK.
-- Cirq continues to lead in flexible noise modeling.
+## How to Run
+1. Install dependencies: `pip install qiskit qiskit-aer cirq qsharp`
+2. Run scripts: `python scripts/qiskit_bell.py`, etc.
