@@ -1,11 +1,14 @@
-[2026-05-20 10:05:01] RUNNING: bell_state_qiskit.py
-[2026-05-20 10:05:02] OUTPUT: {'00': 512, '11': 512}
-[2026-05-20 10:05:02] STATUS: Success. Error rate: 0%.
+[2026-05-20 10:20:01] Running scripts/bell_state_qiskit.py...
+[2026-05-20 10:20:03] Output: Quasi-distribution: {0: 0.498, 3: 0.502}
+[2026-05-20 10:20:03] Status: SUCCESS
 
-[2026-05-20 10:05:05] RUNNING: bell_state_cirq.py
-[2026-05-20 10:05:05] OUTPUT: Counter({0: 508, 3: 516})
-[2026-05-20 10:05:05] STATUS: Success. Error rate: 0%.
+[2026-05-20 10:20:05] Running scripts/bell_state_cirq.py...
+[2026-05-20 10:20:06] Output: Counter({0: 512, 3: 488})
+[2026-05-20 10:20:06] Status: SUCCESS
 
-[2026-05-20 10:05:10] RUNNING: bell_state_qsharp.py
-[2026-05-20 10:05:12] OUTPUT: {'(Zero, Zero)': 505, '(One, One)': 519, 'Other': 0}
-[2026-05-20 10:05:12] STATUS: Success. Error rate: 0%.
+[2026-05-20 10:20:08] Running scripts/bell_state_qsharp.py...
+[2026-05-20 10:20:10] Output: Sample Results: [('Zero', 'Zero'), ('One', 'One'), ...]
+[2026-05-20 10:20:10] Status: SUCCESS
+
+[Summary]
+Error Rate: 0% across all frameworks in the standardized Bell State test.
