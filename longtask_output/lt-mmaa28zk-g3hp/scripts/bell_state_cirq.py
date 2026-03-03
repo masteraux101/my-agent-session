@@ -1,28 +1,30 @@
 """
-Bell State Generation in Cirq
-Generates the state: (|00> + |11>) / sqrt(2)
+Bell State Generation - Cirq (2026 Standard)
 """
 import cirq
 
-def run_bell_state():
+def create_bell_state():
     # Define qubits
-    q0, q1 = cirq.LineQubit.range(2)
+    q0 = cirq.GridQubit(0, 0)
+    q1 = cirq.GridQubit(0, 1)
     
-    # Create the circuit
+    # Create circuit
     circuit = cirq.Circuit(
         cirq.H(q0),
         cirq.CNOT(q0, q1),
         cirq.measure(q0, q1, key='result')
     )
     
+    print("--- Cirq Bell State Circuit ---")
+    print(circuit)
+    
     # Simulate the circuit
     simulator = cirq.Simulator()
-    result = simulator.run(circuit, repetitions=1024)
+    result = simulator.run(circuit, repetitions=1000)
     
-    # Process results
-    counts = result.histogram(key='result')
-    print("Cirq Bell State Execution Results (Decimal representation):")
-    print(counts)
+    print("\nResults Summary:")
+    print(result.histogram(key='result'))
+    return result
 
 if __name__ == "__main__":
-    run_bell_state()
+    create_bell_state()
