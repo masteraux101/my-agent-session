@@ -1,11 +1,13 @@
-# Quantum Frameworks Comparison 2026
+# 2026 Quantum Framework Benchmark Repository
 
-This repository contains a comparative analysis and functional test scripts for the three major quantum computing frameworks: Qiskit, Cirq, and Q#.
+This repository contains a comparative analysis and test scripts for the three major quantum computing frameworks in 2026: **Qiskit**, **Cirq**, and **Q#**.
 
-## Structure
-- `scripts/`: Implementation of Bell State generation in each framework.
-- `logs/`: Installation and execution logs.
-- `analysis/`: Detailed technical comparisons and GitHub activity reports.
+## Contents
+- `scripts/`: Python and Q# scripts generating a standard Bell State ($|00\rangle + |11\rangle$).
+- `logs/`: Installation and execution logs captured during local testing.
+- `analysis/`: Detailed reports on documentation, GitHub activity, and technical performance.
 
-## Quick Start
-To run these scripts, ensure you have Python 3.11+ installed.
+## How to Run
+1. Ensure you have Python 3.11+ installed.
+2. Install dependencies:
+   
