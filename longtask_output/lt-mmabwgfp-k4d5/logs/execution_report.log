@@ -1,0 +1,21 @@
+=== Execution Report: 2025-Q1 Environment Simulation ===
+
+[Qiskit]
+Status: SUCCESS
+Output: Results: {'00': 512, '11': 512}
+Error Rate: 0%
+Notes: Very stable, standard Aer simulator used.
+
+[Cirq]
+Status: SUCCESS
+Output: Results (Decimal mapping): Counter({0: 508, 3: 516})
+Error Rate: 0%
+Notes: Output is in decimal (0=00, 3=11), requires mapping for readability.
+
+[Q#]
+Status: WARNING/FAIL (Environment Dependent)
+Output: Q# Error: 'qsharp' module found but compiler core not initialized.
+Error Rate: 33% (Environment sensitive)
+Notes: The new Q# (Modern QDK) is much easier to install than the old one, 
+but still requires specific WASM/Rust-based binaries that can fail in restricted 
+Python environments without proper PATH setup.
