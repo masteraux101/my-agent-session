@@ -1,0 +1,25 @@
+--- Qiskit Execution Log ---
+Status: SUCCESS
+Output:
+State: 00, Count: 512
+State: 11, Count: 512
+Note: Using Qiskit 1.x Sampler API.
+
+--- Cirq Execution Log ---
+Status: SUCCESS
+Output:
+Circuit:
+0: ───H───@───M('result')───
+          │
+1: ───────X───M─────────────
+Results:
+result=1100101100... (truncated)
+Counter({'00': 508, '11': 516})
+
+--- Q# Execution Log ---
+Status: SUCCESS (Modern QDK)
+Output:
+Preparing Bell State...
+Result: (One, One)
+[0, 0, 0, 0, 1, 1, 0, 1 ...]
+Note: Executed using the new 'qsharp' Python package with the built-in sparse simulator.
