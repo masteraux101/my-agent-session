@@ -98,18 +98,29 @@ def _trim_text(text, limit=4000):
 def _append_session_turn(state, role, text, source):
     session = ensure_model_session(state)
     message = {
-        "role": role,
+        "role": "model" if role == "model" else "user",
         "parts": [{"text": _trim_text(text)}],
-        "meta": {
-            "source": source,
-            "at": utc_now(),
-        }
     }
     session.setdefault("messages", []).append(message)
     max_kept = MODEL_SESSION_MAX_MESSAGES * 2
     if len(session["messages"]) > max_kept:
         session["messages"] = session["messages"][-max_kept:]
     session["updatedAt"] = utc_now()
+
+
+def _sanitize_contents_messages(messages):
+    sanitized = []
+    for msg in messages or []:
+        role = "model" if (msg.get("role") == "model") else "user"
+        parts = msg.get("parts") or []
+        safe_parts = []
+        for p in parts:
+            text = p.get("text") if isinstance(p, dict) else None
+            if text:
+                safe_parts.append({"text": _trim_text(text)})
+        if safe_parts:
+            sanitized.append({"role": role, "parts": safe_parts})
+    return sanitized
 
 
 def ensure_review_channel(state):
@@ -322,30 +333,30 @@ def should_continue():
 def call_model(prompt, system_instruction=None, retries=None, state=None):
     """Call Gemini API for evaluation purposes."""
     retries = retries or MODEL_CALL_RETRIES
+    use_history = state is not None
     if not GEMINI_API_KEY:
         print("[eval] No GEMINI_API_KEY — skipping AI evaluation")
         return None
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={GEMINI_API_KEY}"
 
-    if state is not None:
-        session = ensure_model_session(state)
-        history = session.get("messages", [])[-(MODEL_SESSION_MAX_MESSAGES * 2):]
-        current_turn = {
-            "role": "user",
-            "parts": [{"text": _trim_text(prompt)}],
-            "meta": {"source": "watchdog", "at": utc_now()},
-        }
-        contents = history + [current_turn]
-    else:
-        contents = [{"parts": [{"text": prompt}]}]
+    def build_body(history_enabled=True):
+        if history_enabled and state is not None:
+            session = ensure_model_session(state)
+            history = session.get("messages", [])[-(MODEL_SESSION_MAX_MESSAGES * 2):]
+            contents = _sanitize_contents_messages(history)
+            contents.append({"role": "user", "parts": [{"text": _trim_text(prompt)}]})
+        else:
+            contents = [{"role": "user", "parts": [{"text": _trim_text(prompt)}]}]
 
-    body = {"contents": contents}
-    if system_instruction:
-        body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-    body["generationConfig"] = {"temperature": 0.3, "maxOutputTokens": 4096}
+        body_obj = {"contents": contents}
+        if system_instruction:
+            body_obj["systemInstruction"] = {"parts": [{"text": _trim_text(system_instruction, 8000)}]}
+        body_obj["generationConfig"] = {"temperature": 0.3, "maxOutputTokens": 4096}
+        return body_obj
 
     for attempt in range(retries):
         try:
+            body = build_body(history_enabled=use_history)
             data = json.dumps(body).encode()
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=120) as resp:
@@ -358,6 +369,19 @@ def call_model(prompt, system_instruction=None, retries=None, state=None):
                     _append_session_turn(state, "user", prompt, "watchdog")
                     _append_session_turn(state, "model", text, "model")
                 return text
+        except urllib.error.HTTPError as e:
+            code = getattr(e, "code", None)
+            detail = ""
+            try:
+                detail = e.read().decode(errors="ignore")[:500]
+            except Exception:
+                pass
+            print(f"[eval] Model call attempt {attempt+1}/{retries} failed: HTTP {code} {detail}")
+
+            if code == 400 and use_history:
+                print("[eval] HTTP 400 with session history. Falling back to single-turn request.")
+                use_history = False
+                continue
         except Exception as e:
             print(f"[eval] Model call attempt {attempt+1}/{retries} failed: {e}")
             if attempt < retries - 1:

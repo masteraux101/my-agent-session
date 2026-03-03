@@ -114,18 +114,29 @@ def _trim_text(text, limit=4000):
 def _append_session_turn(state, role, text, source):
     session = ensure_model_session(state)
     message = {
-        "role": role,
+        "role": "model" if role == "model" else "user",
         "parts": [{"text": _trim_text(text)}],
-        "meta": {
-            "source": source,
-            "at": utc_now(),
-        }
     }
     session.setdefault("messages", []).append(message)
     max_kept = MODEL_SESSION_MAX_MESSAGES * 2
     if len(session["messages"]) > max_kept:
         session["messages"] = session["messages"][-max_kept:]
     session["updatedAt"] = utc_now()
+
+
+def _sanitize_contents_messages(messages):
+    sanitized = []
+    for msg in messages or []:
+        role = "model" if (msg.get("role") == "model") else "user"
+        parts = msg.get("parts") or []
+        safe_parts = []
+        for p in parts:
+            text = p.get("text") if isinstance(p, dict) else None
+            if text:
+                safe_parts.append({"text": _trim_text(text)})
+        if safe_parts:
+            sanitized.append({"role": role, "parts": safe_parts})
+    return sanitized
 
 
 def mark_output_ready_for_review(state, summary):
@@ -247,26 +258,26 @@ def save_state_to_repo(state, max_attempts=5):
 
 def call_model(prompt, system_instruction=None, retries=3, state=None):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={API_KEY}"
+    use_history = state is not None
 
-    if state is not None:
-        session = ensure_model_session(state)
-        history = session.get("messages", [])[-(MODEL_SESSION_MAX_MESSAGES * 2):]
-        current_turn = {
-            "role": "user",
-            "parts": [{"text": _trim_text(prompt)}],
-            "meta": {"source": "runner", "at": utc_now()},
-        }
-        contents = history + [current_turn]
-    else:
-        contents = [{"parts": [{"text": prompt}]}]
+    def build_body(history_enabled=True):
+        if history_enabled and state is not None:
+            session = ensure_model_session(state)
+            history = session.get("messages", [])[-(MODEL_SESSION_MAX_MESSAGES * 2):]
+            contents = _sanitize_contents_messages(history)
+            contents.append({"role": "user", "parts": [{"text": _trim_text(prompt)}]})
+        else:
+            contents = [{"role": "user", "parts": [{"text": _trim_text(prompt)}]}]
 
-    body = {"contents": contents}
-    if system_instruction:
-        body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-    body["generationConfig"] = {"temperature": 0.7, "maxOutputTokens": 8192}
+        body_obj = {"contents": contents}
+        if system_instruction:
+            body_obj["systemInstruction"] = {"parts": [{"text": _trim_text(system_instruction, 8000)}]}
+        body_obj["generationConfig"] = {"temperature": 0.7, "maxOutputTokens": 8192}
+        return body_obj
 
     for attempt in range(retries):
         try:
+            body = build_body(history_enabled=use_history)
             data = json.dumps(body).encode()
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=180) as resp:
@@ -281,6 +292,20 @@ def call_model(prompt, system_instruction=None, retries=3, state=None):
                         _append_session_turn(state, "model", text, "model")
                     return text
                 print(f"[model] Empty response on attempt {attempt+1}")
+        except urllib.error.HTTPError as e:
+            code = getattr(e, "code", None)
+            detail = ""
+            try:
+                detail = e.read().decode(errors="ignore")[:500]
+            except Exception:
+                pass
+            print(f"[model] Attempt {attempt+1}/{retries} failed: HTTP {code} {detail}")
+
+            # Fallback: if payload/history triggers 400, retry once without history context.
+            if code == 400 and use_history:
+                print("[model] HTTP 400 with session history. Falling back to single-turn request.")
+                use_history = False
+                continue
         except Exception as e:
             print(f"[model] Attempt {attempt+1}/{retries} failed: {e}")
         if attempt < retries - 1:
