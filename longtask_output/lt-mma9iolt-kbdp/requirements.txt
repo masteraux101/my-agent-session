@@ -1,0 +1,7 @@
+# Quantum Frameworks 2026 Requirements
+qiskit>=1.5.0
+qiskit-ibm-runtime>=0.30.0
+cirq>=1.5.0
+qsharp>=1.0.0
+matplotlib
+pyscf; sys_platform != 'win32' # Often required for advanced quantum chemistry simulations
