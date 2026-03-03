@@ -1,43 +1,45 @@
 """
-Bell State Generation in Modern Q# (2026 Rust-based compiler)
-Interfaced via Python
+Bell State Generation - Q# (2026 Modern QDK)
+Requires the 'qsharp' python package.
 """
 import qsharp
 
-def run_bell_state():
-    # Define the Q# operation
-    qsharp_code = """
-    namespace BellState {
-        open Microsoft.Quantum.Measurement;
-        open Microsoft.Quantum.Intrinsic;
+# Q# code defined as a string for the modern QDK compiler
+qsharp_code = """
+namespace BellState {
+    open Microsoft.Quantum.Diagnostics;
+    open Microsoft.Quantum.Intrinsic;
+    open Microsoft.Quantum.Measurement;
+    open Microsoft.Quantum.Canon;
 
-        operation Generate() : (Result, Result) {
-            use (q0, q1) = (Qubit(), Qubit());
-            H(q0);
-            CNOT(q0, q1);
-            let res = (M(q0), M(q1));
-            Reset(q0);
-            Reset(q1);
-            return res;
-        }
+    operation GenerateBellState() : (Result, Result) {
+        use (q0, q1) = (Qubit(), Qubit());
+        H(q0);
+        CNOT(q0, q1);
+        let res = (M(q0), M(q1));
+        Reset(q0);
+        Reset(q1);
+        return res;
     }
-    """
-    
-    # Compile the code
+}
+"""
+
+def run_qsharp_bell():
+    print("--- Q# Bell State Execution ---")
+    # Compile the Q# code
     qsharp.eval(qsharp_code)
     
-    # Run 1024 times to simulate shots
-    results = {"(Zero, Zero)": 0, "(One, One)": 0, "Other": 0}
-    for _ in range(1024):
-        res = qsharp.eval("BellState.Generate()")
-        res_str = str(res)
-        if res_str in results:
-            results[res_str] += 1
-        else:
-            results["Other"] += 1
-            
-    print("Q# Bell State Execution Results:")
-    print(results)
+    # Run the operation multiple times
+    results = []
+    for _ in range(10):
+        res = qsharp.run("BellState.GenerateBellState()", shots=1)
+        results.append(res)
+    
+    print(f"Sample Results: {results}")
 
 if __name__ == "__main__":
-    run_bell_state()
+    try:
+        run_qsharp_bell()
+    except Exception as e:
+        print(f"Q# Execution Error: {e}")
+        print("Note: Ensure the latest Azure Quantum Development Kit is installed.")
