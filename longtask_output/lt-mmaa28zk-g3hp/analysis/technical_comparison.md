@@ -1,16 +1,16 @@
-# Technical Comparison of Quantum Frameworks
+# 2026 Quantum Framework Technical Comparison
 
-## 1. Ease of Use
-- **Qiskit**: Extremely high. The high-level abstractions (Primitives) make it easy for non-physicists.
-- **Cirq**: Moderate. Requires a better understanding of qubit topologies and gate decompositions.
-- **Q#**: High (Modern version). The Python integration has removed the previous .NET barrier.
+## 1. Error Rates and Stability
+- **Qiskit**: Very low error rate (local simulation). The transition to the Primitive API has standardized error handling.
+- **Cirq**: Highly stable for simulation, but sensitive to qubit mapping configurations.
+- **Q#**: Lowest runtime error rate due to strong typing and the new Rust-based compiler, which catches many issues at compile-time.
 
-## 2. Documentation Quality
-- **Qiskit**: Best-in-class. Comprehensive API refs and conceptual guides.
-- **Cirq**: Good for technical users, but lacks "beginner-to-expert" pathways.
-- **Q#**: Excellent for systems programming and hybrid algorithm development.
+## 2. Documentation Readability
+- **Qiskit (Score: 9/10)**: The "Qiskit Ecosystem" documentation is the gold standard. Includes interactive tutorials and clear migration guides from 0.x versions.
+- **Cirq (Score: 7/10)**: Documentation is comprehensive but remains fragmented. Best for users who understand the underlying hardware physics.
+- **Q# (Score: 8/10)**: Significantly improved since the 2024 reboot. The "Q# for Python" documentation is concise and focused on high-level algorithmic expression.
 
-## 3. Performance
-- **Q#**: Superior. The Rust-based compiler optimizes circuits significantly faster than Python-based generators.
-- **Qiskit**: Good, but can be sluggish for extremely large circuits without C++ backends.
-- **Cirq**: Moderate, optimized for specific Google hardware paths.
+## 3. Developer Experience (DX)
+- **Qiskit**: Best-in-class IDE support (VS Code extensions).
+- **Cirq**: Minimalist; relies heavily on standard Python debugging.
+- **Q#**: The VS Code extension for Q# provides the most advanced quantum debugging features (state visualization, etc.).
