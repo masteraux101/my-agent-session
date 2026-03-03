@@ -66,6 +66,10 @@ def decrypt_state(passphrase, b64data):
 # ── GitHub API helpers ──────────────────────────────────────────────
 API_BASE = "https://api.github.com"
 
+
+def utc_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
 def gh_headers():
     return {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -262,6 +266,83 @@ def write_deliverable_to_repo(filepath, content):
             print(f"[deliverable] Failed to write {full_path}: {e}")
             raise
 
+
+def print_watchdog_advice(advice):
+    if not advice:
+        return
+
+    print("\n[watchdog-advice] Received revision guidance before execution:")
+    print(f"[watchdog-advice] Eval #{advice.get('evalNumber', '?')}")
+
+    issues = advice.get("issues") or []
+    if issues:
+        print("[watchdog-advice] Issues to fix:")
+        for issue in issues:
+            print(f"  - {issue}")
+
+    suggestions = advice.get("suggestions")
+    if suggestions:
+        print(f"[watchdog-advice] Suggestions: {suggestions}")
+
+    deliverable_paths = advice.get("deliverablePaths") or []
+    if deliverable_paths:
+        print("[watchdog-advice] Previous deliverables to reuse/update:")
+        for path in deliverable_paths:
+            print(f"  - {path}")
+    else:
+        print(f"[watchdog-advice] Deliverable root: {DELIVERABLE_DIR}/")
+    print()
+
+
+def build_history_context(state):
+    if not state["steps"]:
+        return ""
+
+    recent = state["steps"][-5:]
+    lines = ["\n=== Previous Steps ==="]
+    for s in recent:
+        lines.append(f"\nStep {s.get('step', '?')}: {s.get('summary', 'N/A')}")
+        if s.get("reflection"):
+            lines.append(f"  Reflection: {s['reflection']}")
+        if s.get("strategy_adjustment"):
+            lines.append(f"  Strategy adjustment: {s['strategy_adjustment']}")
+        if s.get("deliverables_written"):
+            lines.append(f"  Files produced: {', '.join(s['deliverables_written'])}")
+
+    if state.get("deliverables"):
+        lines.append(f"\n=== Deliverables so far: {len(state['deliverables'])} files ===")
+        for d in state["deliverables"][-10:]:
+            lines.append(f"  - {d}")
+    return "\n".join(lines)
+
+
+def build_step_info(state, response, parsed, deliverables_written):
+    step_info = {
+        "step": state["currentStep"],
+        "summary": response[:300],
+        "reflection": "",
+        "strategy_adjustment": "",
+        "deliverables_written": deliverables_written,
+        "done": False,
+    }
+
+    if not parsed:
+        return step_info
+
+    step_info.update({
+        "step": parsed.get("step", state["currentStep"]),
+        "totalSteps": parsed.get("totalSteps"),
+        "progress": parsed.get("progress", 0),
+        "summary": parsed.get("summary", response[:300]),
+        "reflection": parsed.get("reflection", ""),
+        "strategy_adjustment": parsed.get("strategy_adjustment", ""),
+        "deliverables_written": deliverables_written,
+        "done": parsed.get("done", False),
+    })
+    state["totalSteps"] = parsed.get("totalSteps", state["totalSteps"])
+    state["progress"] = parsed.get("progress", state["progress"])
+    return step_info
+
 # ── Main ────────────────────────────────────────────────────────────
 
 def main():
@@ -281,7 +362,7 @@ def main():
     state = load_previous_state() or make_initial_state()
     state["iteration"] = ITERATION
     state["status"] = "running"
-    state["lastUpdateAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    state["lastUpdateAt"] = utc_now()
 
     # Prefer prompt from state (set by browser), fall back to env var
     task_prompt = state.get("taskPrompt") or TASK_PROMPT
@@ -289,6 +370,9 @@ def main():
         print("[fatal] No task prompt found in state or TASK_PROMPT env var", file=sys.stderr)
         sys.exit(1)
     print(f"Task prompt: {task_prompt[:200]}...")
+
+    latest_advice = state.get("latestWatchdogAdvice") or {}
+    print_watchdog_advice(latest_advice)
 
     # Save initial state immediately
     try:
@@ -341,27 +425,6 @@ def main():
         "- If the task requires research/analysis, synthesize findings into a deliverable document."
     )
 
-    # Build history context — rich, includes strategy adjustments
-    def build_history():
-        if not state["steps"]:
-            return ""
-        recent = state["steps"][-5:]
-        lines = ["\n=== Previous Steps ==="]
-        for s in recent:
-            lines.append(f"\nStep {s.get('step', '?')}: {s.get('summary', 'N/A')}")
-            if s.get("reflection"):
-                lines.append(f"  Reflection: {s['reflection']}")
-            if s.get("strategy_adjustment"):
-                lines.append(f"  Strategy adjustment: {s['strategy_adjustment']}")
-            if s.get("deliverables_written"):
-                lines.append(f"  Files produced: {', '.join(s['deliverables_written'])}")
-        # Include deliverables summary
-        if state.get("deliverables"):
-            lines.append(f"\n=== Deliverables so far: {len(state['deliverables'])} files ===")
-            for d in state["deliverables"][-10:]:
-                lines.append(f"  - {d}")
-        return "\n".join(lines)
-
     step_count = 0
     max_steps_per_iteration = 50
     consecutive_failures = 0
@@ -375,7 +438,7 @@ def main():
 
         prompt = (
             f"Task: {task_prompt}\n"
-            f"{build_history()}\n\n"
+            f"{build_history_context(state)}\n\n"
             f"Now perform step {state['currentStep']}. "
             "Remember to end with the JSON progress block."
         )
@@ -420,31 +483,10 @@ def main():
 
         # Parse progress
         parsed = parse_progress(response)
-        step_info = {
-            "step": state["currentStep"],
-            "summary": response[:300],
-            "reflection": "",
-            "strategy_adjustment": "",
-            "deliverables_written": deliverables_written,
-            "done": False,
-        }
-
-        if parsed:
-            step_info.update({
-                "step": parsed.get("step", state["currentStep"]),
-                "totalSteps": parsed.get("totalSteps"),
-                "progress": parsed.get("progress", 0),
-                "summary": parsed.get("summary", response[:300]),
-                "reflection": parsed.get("reflection", ""),
-                "strategy_adjustment": parsed.get("strategy_adjustment", ""),
-                "deliverables_written": deliverables_written,
-                "done": parsed.get("done", False),
-            })
-            state["totalSteps"] = parsed.get("totalSteps", state["totalSteps"])
-            state["progress"] = parsed.get("progress", state["progress"])
+        step_info = build_step_info(state, response, parsed, deliverables_written)
 
         state["steps"].append(step_info)
-        state["lastUpdateAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        state["lastUpdateAt"] = utc_now()
 
         # Save periodically or on completion
         if step_count % 3 == 0 or step_info["done"]:
@@ -486,7 +528,7 @@ if __name__ == "__main__":
             state = load_previous_state() or make_initial_state()
             state["status"] = "error"
             state["error"] = str(e)
-            state["lastUpdateAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            state["lastUpdateAt"] = utc_now()
             save_state_to_repo(state)
         except Exception:
             pass

@@ -49,6 +49,23 @@ STATE_DIR          = "longtask_state"
 STATE_FILE         = f"{STATE_DIR}/{TASK_ID}.enc"
 API_BASE           = "https://api.github.com"
 EVAL_COUNT         = 0  # track how many evaluations we've done
+MAX_EVALUATIONS    = 3
+READ_DELIVERABLE_LIMIT = 5
+PROMPT_DELIVERABLE_LIMIT = 20
+
+
+def utc_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def append_evaluation(state, verdict, issues=None, suggestions=""):
+    state.setdefault("evaluations", []).append({
+        "evalNumber": EVAL_COUNT,
+        "verdict": verdict,
+        "issues": issues or [],
+        "suggestions": suggestions,
+        "timestamp": utc_now(),
+    })
 
 # ── GitHub API helpers ──────────────────────────────────────────────
 
@@ -223,7 +240,7 @@ def read_deliverables(state):
     if not deliverables:
         return ""
     results = []
-    for path in deliverables[-5:]:  # Read last 5 deliverables
+    for path in deliverables[-READ_DELIVERABLE_LIMIT:]:
         url = f"{API_BASE}/repos/{REPO_FULL}/contents/{path}"
         try:
             data = gh_request("GET", url)
@@ -241,10 +258,11 @@ def evaluate_runner_output(state):
     Returns: {"verdict": "pass"|"needs_improvement", "issues": [...], "suggestions": "...", "revised_prompt": "..."}
     """
     global EVAL_COUNT
+    EVAL_COUNT = max(EVAL_COUNT, len(state.get("evaluations", [])))
     EVAL_COUNT += 1
 
-    if EVAL_COUNT > 3:
-        print("[eval] Already evaluated 3 times — accepting result to avoid infinite loop.")
+    if EVAL_COUNT > MAX_EVALUATIONS:
+        print(f"[eval] Already evaluated {MAX_EVALUATIONS} times — accepting result to avoid infinite loop.")
         return {"verdict": "pass", "issues": [], "suggestions": ""}
 
     task_prompt = state.get("taskPrompt", "")
@@ -311,6 +329,31 @@ def evaluate_runner_output(state):
     print(f"[eval] Could not parse evaluation response — defaulting to pass")
     return {"verdict": "pass", "issues": [], "suggestions": ""}
 
+def build_revised_task_prompt(state, revised_prompt, suggestions, issues):
+    """Build a robust next-round prompt that always includes prior artifact locations."""
+    base_prompt = (revised_prompt or state.get("taskPrompt") or "").strip()
+    deliverables = state.get("deliverables", [])
+
+    if deliverables:
+        deliverable_lines = "\n".join(f"- {p}" for p in deliverables[-PROMPT_DELIVERABLE_LIMIT:])
+    else:
+        deliverable_lines = f"- longtask_output/{TASK_ID}/ (no explicit files recorded yet)"
+
+    issues_lines = "\n".join(f"- {i}" for i in (issues or [])) or "- (none listed)"
+    suggestions_text = (suggestions or "").strip() or "(none provided)"
+
+    guidance_block = (
+        "\n\n--- WATCHDOG REVISION GUIDANCE ---\n"
+        "This is a re-run after watchdog evaluation. You MUST address all items below.\n\n"
+        "Issues to fix:\n"
+        f"{issues_lines}\n\n"
+        "Improvement suggestions:\n"
+        f"{suggestions_text}\n\n"
+        "Previous iteration artifacts (read/modify these paths directly):\n"
+        f"{deliverable_lines}\n"
+    )
+    return base_prompt + guidance_block
+
 # ── Main watchdog loop ──────────────────────────────────────────────
 
 def main():
@@ -331,6 +374,12 @@ def main():
     waiting_for_new_run = False
     wait_start = None
     poll_count = 0
+
+    def redispatch_runner(iteration, run_id=None):
+        dispatch_target(iteration)
+        if run_id is not None:
+            processed_run_ids.add(run_id)
+        return True, time.time()
 
     while should_continue():
         poll_count += 1
@@ -419,7 +468,7 @@ def main():
                     print("\n[watchdog] Runner reports task completed. Evaluating output quality...")
                     evaluation = evaluate_runner_output(state)
 
-                    if evaluation.get("verdict") == "needs_improvement" and EVAL_COUNT <= 3:
+                    if evaluation.get("verdict") == "needs_improvement" and EVAL_COUNT <= MAX_EVALUATIONS:
                         issues = evaluation.get("issues", [])
                         revised_prompt = evaluation.get("revised_prompt", "")
                         suggestions = evaluation.get("suggestions", "")
@@ -429,47 +478,41 @@ def main():
                             print(f"  - {issue}")
                         print(f"[eval] Suggestions: {suggestions}")
 
-                        if revised_prompt:
-                            # Modify state: update prompt with evaluation feedback, reset for re-execution
-                            state["status"] = "running"
-                            state["taskPrompt"] = revised_prompt
-                            state["progress"] = max(0, state.get("progress", 0) - 20)
-                            state["finalResult"] = None
-                            state["error"] = None
-                            state.setdefault("evaluations", []).append({
-                                "evalNumber": EVAL_COUNT,
-                                "verdict": "needs_improvement",
-                                "issues": issues,
-                                "suggestions": suggestions,
-                                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                            })
+                        merged_prompt = build_revised_task_prompt(state, revised_prompt, suggestions, issues)
+                        deliverable_paths = state.get("deliverables", [])[-PROMPT_DELIVERABLE_LIMIT:]
 
-                            try:
-                                save_task_state(state)
-                            except Exception as e:
-                                print(f"[warn] Failed to save revised state: {e}")
+                        # Modify state: update prompt with evaluation feedback, reset for re-execution
+                        state["status"] = "running"
+                        state["taskPrompt"] = merged_prompt
+                        state["latestWatchdogAdvice"] = {
+                            "evalNumber": EVAL_COUNT,
+                            "issues": issues,
+                            "suggestions": suggestions,
+                            "deliverablePaths": deliverable_paths,
+                            "updatedAt": utc_now(),
+                        }
+                        state["progress"] = max(0, state.get("progress", 0) - 20)
+                        state["finalResult"] = None
+                        state["error"] = None
+                        append_evaluation(state, "needs_improvement", issues, suggestions)
 
-                            # Re-dispatch runner with the revised prompt
-                            iteration = state.get("iteration", 1) + 1
-                            print(f"[eval] Re-dispatching Runner (iteration {iteration}) with revised task...")
-                            dispatch_target(iteration)
-                            processed_run_ids.add(run_id)  # mark old run as processed
-                            waiting_for_new_run = True
-                            wait_start = time.time()
-                            time.sleep(POLL_INTERVAL)
-                            continue
-                        else:
-                            print("[eval] No revised prompt provided — accepting as complete.")
+                        try:
+                            save_task_state(state)
+                        except Exception as e:
+                            print(f"[warn] Failed to save revised state: {e}")
+
+                        # Re-dispatch runner with revised guidance
+                        iteration = state.get("iteration", 1) + 1
+                        print(f"[eval] Re-dispatching Runner (iteration {iteration}) with revised task...")
+                        waiting_for_new_run, wait_start = redispatch_runner(iteration, run_id)
+                        time.sleep(POLL_INTERVAL)
+                        continue
 
                     # Evaluation passed or no AI available
                     print("\n✅ Task completed and evaluation passed!")
                     processed_run_ids.add(run_id)
                     # Record evaluation in state
-                    state.setdefault("evaluations", []).append({
-                        "evalNumber": EVAL_COUNT,
-                        "verdict": "pass",
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    })
+                    append_evaluation(state, "pass")
                     try:
                         save_task_state(state)
                     except Exception:
@@ -480,9 +523,7 @@ def main():
                     # Task needs more time — dispatch next iteration
                     next_iter = state.get("iteration", 1) + 1
                     print(f"[watchdog] Task needs continuation. Dispatching iteration {next_iter}...")
-                    dispatch_target(next_iter)
-                    waiting_for_new_run = True
-                    wait_start = time.time()
+                    waiting_for_new_run, wait_start = redispatch_runner(next_iter, run_id)
                     time.sleep(POLL_INTERVAL)
                     continue
 
@@ -498,9 +539,7 @@ def main():
                         except Exception as e:
                             print(f"[warn] Could not clear error state: {e}")
                         iteration = state.get("iteration", 1)
-                        dispatch_target(iteration)
-                        waiting_for_new_run = True
-                        wait_start = time.time()
+                        waiting_for_new_run, wait_start = redispatch_runner(iteration, run_id)
                         time.sleep(POLL_INTERVAL)
                         continue
                     else:
@@ -515,9 +554,7 @@ def main():
                         print(f"[watchdog] Task stuck at '{task_status}' and run {run_conclusion}. Retry {retry_count}/{MAX_RETRIES}...")
                         if retry_count <= MAX_RETRIES:
                             iteration = state.get("iteration", 1)
-                            dispatch_target(iteration)
-                            waiting_for_new_run = True
-                            wait_start = time.time()
+                            waiting_for_new_run, wait_start = redispatch_runner(iteration, run_id)
                             time.sleep(POLL_INTERVAL)
                             continue
                         else:
@@ -541,9 +578,7 @@ def main():
                 if retry_count <= MAX_RETRIES:
                     print(f"[watchdog] Run failed ({run_conclusion}), no state found. Retry {retry_count}/{MAX_RETRIES}...")
                     iteration = (state.get("iteration", 1) if state else 1)
-                    dispatch_target(iteration)
-                    waiting_for_new_run = True
-                    wait_start = time.time()
+                    waiting_for_new_run, wait_start = redispatch_runner(iteration, run_id)
                     time.sleep(POLL_INTERVAL)
                     continue
                 else:
@@ -567,9 +602,7 @@ def main():
                     print("[watchdog] State now shows completed. Will evaluate on next poll...")
                 elif state and state.get("status") == "continuation":
                     next_iter = state.get("iteration", 1) + 1
-                    dispatch_target(next_iter)
-                    waiting_for_new_run = True
-                    wait_start = time.time()
+                    waiting_for_new_run, wait_start = redispatch_runner(next_iter, run_id)
                     continue
                 else:
                     status_str = state.get('status', 'unknown') if state else 'no state'
