@@ -1,3 +1,6 @@
+"""
+Cirq Bell State Generation
+"""
 import cirq
 
 def create_bell_state():
@@ -17,9 +20,9 @@ def create_bell_state():
     
     # Simulate
     simulator = cirq.Simulator()
-    result = simulator.run(circuit, repetitions=1024)
+    result = simulator.run(circuit, repetitions=1000)
     
-    print("Results:")
+    print("\nResults Summary:")
     print(result.histogram(key='result'))
 
 if __name__ == "__main__":
