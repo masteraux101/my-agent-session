@@ -1,9 +1,0 @@
-[2026-05-20 10:00:01] Starting installation of quantum frameworks...
-[10:00:05] Command: pip install qiskit qiskit-ibm-runtime
-[10:00:15] Result: Success. Installed qiskit-2.1.0
-[10:00:16] Command: pip install cirq
-[10:00:22] Result: Success. Installed cirq-1.5.0
-[10:00:23] Command: pip install qsharp
-[10:00:45] Result: Success. Installed qsharp-1.2.0 (Rust-backend optimized)
-[10:00:46] Verifying installations...
-[10:00:50] All frameworks successfully verified.
