@@ -1,15 +1,19 @@
+"""
+Python wrapper for Modern Q# Bell State
+"""
 import qsharp
 
 def run_qsharp_bell():
-    print("--- Q# Bell State (Modern QDK) ---")
-    # Using the qsharp package to run the .qs logic
-    # In 2026, this is the standard way to bridge Python and Q#
-    try:
-        # Assuming bell.qs is in the same directory
-        result = qsharp.run("BellState.GenerateBellState()")
-        print(f"Result from Q# simulation: {result}")
-    except Exception as e:
-        print(f"Q# Execution Error: {e}")
+    print("--- Modern Q# Bell State ---")
+    # In Modern QDK, we can compile and run directly or use the .qs file
+    # Here we use the qsharp.eval for a quick test
+    result = qsharp.eval("BellState.GenerateBellState()")
+    print(f"Measured Result: {result}")
 
 if __name__ == "__main__":
-    run_qsharp_bell()
+    # Note: Requires 'bell.qs' in the same directory or defined in the session
+    try:
+        qsharp.init(project_root = '.')
+        run_qsharp_bell()
+    except Exception as e:
+        print(f"Q# Execution Log: {e}")
