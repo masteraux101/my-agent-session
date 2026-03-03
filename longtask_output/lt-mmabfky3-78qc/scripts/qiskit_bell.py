@@ -1,27 +1,26 @@
+import qiskit
 from qiskit import QuantumCircuit
 from qiskit_aer import AerSimulator
-from qiskit.visualization import plot_histogram
 
-def generate_bell_state():
-    # Create a Quantum Circuit with 2 qubits
-    qc = QuantumCircuit(2)
-    # Apply H gate to the first qubit
-    qc.h(0)
-    # Apply CNOT gate
-    qc.cx(0, 1)
-    # Measure
-    qc.measure_all()
-    
-    # Run on simulator
-    simulator = AerSimulator()
-    result = simulator.run(qc).result()
-    counts = result.get_counts()
-    return counts
-
-if __name__ == "__main__":
+def run_qiskit_bell():
+    print("--- Qiskit Bell State ---")
     try:
-        print("Running Qiskit Bell State...")
-        counts = generate_bell_state()
+        # Create circuit
+        qc = QuantumCircuit(2)
+        qc.h(0)
+        qc.cx(0, 1)
+        qc.measure_all()
+        
+        # Simulate
+        simulator = AerSimulator()
+        job = simulator.run(qc, shots=1000)
+        result = job.result()
+        counts = result.get_counts()
         print(f"Results: {counts}")
+        return True
     except Exception as e:
         print(f"Qiskit Error: {e}")
+        return False
+
+if __name__ == "__main__":
+    run_qiskit_bell()
