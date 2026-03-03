@@ -1,27 +1,30 @@
+"""
+Bell State Generation in Qiskit (2026 Standard)
+Generates the state: (|00> + |11>) / sqrt(2)
+"""
 from qiskit import QuantumCircuit
 from qiskit_aer import AerSimulator
 
 def run_bell_state():
-    # Create a Quantum Circuit with 2 qubits
+    # Initialize a 2-qubit circuit
     qc = QuantumCircuit(2)
-    # Apply H gate to qubit 0
+    
+    # Apply Hadamard to qubit 0
     qc.h(0)
-    # Apply CNOT gate (control: 0, target: 1)
+    # Apply CNOT with control 0 and target 1
     qc.cx(0, 1)
-    # Measure all qubits
+    
+    # Measure both qubits
     qc.measure_all()
-
-    # Use Aer's simulator
+    
+    # Execute using Aer Simulator
     simulator = AerSimulator()
     job = simulator.run(qc, shots=1024)
     result = job.result()
-
-    # Get counts
-    counts = result.get_counts(qc)
-    print(f"Qiskit Bell State Counts: {counts}")
+    counts = result.get_counts()
+    
+    print("Qiskit Bell State Execution Results:")
+    print(counts)
 
 if __name__ == "__main__":
-    try:
-        run_bell_state()
-    except Exception as e:
-        print(f"Qiskit Execution Error: {e}")
+    run_bell_state()
