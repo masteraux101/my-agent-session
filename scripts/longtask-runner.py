@@ -42,6 +42,7 @@ WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE", "")
 STATE_DIR     = "longtask_state"
 STATE_FILE    = f"{STATE_DIR}/{TASK_ID}.enc"
 START_TIME    = time.time()
+REVIEW_POLL_INTERVAL = int(os.environ.get("REVIEW_POLL_INTERVAL", "15"))
 
 # ── Crypto (AES-256-GCM, compatible with BrowserAgent crypto.js) ──
 
@@ -70,12 +71,66 @@ API_BASE = "https://api.github.com"
 def utc_now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+
+def ensure_review_channel(state):
+    return state.setdefault("reviewChannel", {
+        "runnerStatus": "working",
+        "runnerUpdatedAt": None,
+        "round": ITERATION,
+        "watchdogDecision": None,
+        "watchdogUpdatedAt": None,
+        "evalNumber": 0,
+        "issues": [],
+        "suggestions": "",
+        "revisedPrompt": "",
+    })
+
+
+def mark_output_ready_for_review(state, summary):
+    review = ensure_review_channel(state)
+    review["runnerStatus"] = "output_ready"
+    review["runnerUpdatedAt"] = utc_now()
+    review["round"] = state.get("iteration", ITERATION)
+    review["summary"] = summary or ""
+    review["watchdogDecision"] = None
+    review["watchdogUpdatedAt"] = None
+    review["issues"] = []
+    review["suggestions"] = ""
+    review["revisedPrompt"] = ""
+
+
+def consume_watchdog_decision(state):
+    review = ensure_review_channel(state)
+    decision = (review.get("watchdogDecision") or "").strip().lower()
+    if decision not in ("approved", "needs_improvement"):
+        return None
+
+    result = {
+        "decision": decision,
+        "revisedPrompt": review.get("revisedPrompt") or "",
+        "issues": review.get("issues") or [],
+        "suggestions": review.get("suggestions") or "",
+        "evalNumber": review.get("evalNumber") or 0,
+    }
+
+    review["watchdogDecision"] = "consumed"
+    review["runnerStatus"] = "working"
+    review["runnerUpdatedAt"] = utc_now()
+    return result
+
 def gh_headers():
     return {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json",
         "Content-Type": "application/json",
     }
+
+
+def is_retryable_http_status(code):
+    if code in (408, 409, 425, 429):
+        return True
+    return 500 <= code <= 599
+
 
 def gh_request(method, url, data=None, retries=3):
     body = json.dumps(data).encode() if data else None
@@ -86,12 +141,25 @@ def gh_request(method, url, data=None, retries=3):
                 if resp.status == 204:
                     return None
                 return json.loads(resp.read().decode())
-        except Exception as e:
-            print(f"[gh] {method} {url} attempt {attempt+1}/{retries} failed: {e}")
+        except urllib.error.HTTPError as e:
+            code = getattr(e, "code", None)
+            retryable = code is not None and is_retryable_http_status(code)
+            print(f"[gh] {method} {url} HTTP {code} attempt {attempt+1}/{retries}: {e}")
+            if retryable and attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+        except urllib.error.URLError as e:
+            print(f"[gh] {method} {url} network error attempt {attempt+1}/{retries}: {e}")
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
-            else:
-                raise
+                continue
+            raise
+        except Exception as e:
+            print(f"[gh] {method} {url} non-retryable error on attempt {attempt+1}/{retries}: {e}")
+            if attempt < retries - 1:
+                time.sleep(1)
+            raise
 
 def load_previous_state():
     url = f"{API_BASE}/repos/{REPO_FULL}/contents/{STATE_FILE}"
@@ -363,6 +431,7 @@ def main():
     state["iteration"] = ITERATION
     state["status"] = "running"
     state["lastUpdateAt"] = utc_now()
+    ensure_review_channel(state)
 
     # Prefer prompt from state (set by browser), fall back to env var
     task_prompt = state.get("taskPrompt") or TASK_PROMPT
@@ -496,15 +565,61 @@ def main():
                 print(f"[warn] Save state failed: {e}")
 
         if step_info["done"]:
-            state["status"] = "completed"
+            state["status"] = "waiting_review"
             state["progress"] = 100
             state["finalResult"] = step_info.get("summary", "Task completed.")
+            mark_output_ready_for_review(state, state["finalResult"])
             try:
                 save_state_to_repo(state)
             except Exception as e:
                 print(f"[warn] Final save failed: {e}")
-            print(f"\n✅ Task completed at step {state['currentStep']}!")
-            return
+
+            print(f"\n✅ Runner produced output at step {state['currentStep']}. Waiting for watchdog review...")
+            while should_continue():
+                time.sleep(REVIEW_POLL_INTERVAL)
+                latest = load_previous_state()
+                if not latest:
+                    print("[review] State unavailable, continuing to wait...")
+                    continue
+
+                decision_payload = consume_watchdog_decision(latest)
+                if not decision_payload:
+                    review = latest.get("reviewChannel", {})
+                    print(f"[review] Waiting... runnerStatus={review.get('runnerStatus', '?')}, decision={review.get('watchdogDecision', 'none')}")
+                    continue
+
+                decision = decision_payload["decision"]
+                if decision == "approved":
+                    latest["status"] = "completed"
+                    latest["progress"] = 100
+                    latest["lastUpdateAt"] = utc_now()
+                    try:
+                        save_state_to_repo(latest)
+                    except Exception as e:
+                        print(f"[warn] Could not persist approval state: {e}")
+                    print("\n✅ Watchdog approved output. Runner exiting.")
+                    return
+
+                if decision == "needs_improvement":
+                    revised_prompt = decision_payload.get("revisedPrompt") or latest.get("taskPrompt") or task_prompt
+                    latest["taskPrompt"] = revised_prompt
+                    latest["status"] = "running"
+                    latest["finalResult"] = None
+                    latest["error"] = None
+                    latest["lastUpdateAt"] = utc_now()
+                    latest["progress"] = max(0, latest.get("progress", 0) - 20)
+                    latest["iteration"] = (latest.get("iteration") or ITERATION) + 1
+
+                    ensure_review_channel(latest)
+                    try:
+                        save_state_to_repo(latest)
+                    except Exception as e:
+                        print(f"[warn] Could not persist rework state: {e}")
+
+                    task_prompt = revised_prompt
+                    state = latest
+                    print("[review] Watchdog requested rework. Continuing next round in the same runner process...")
+                    break
 
     # Ran out of time or steps — save and exit cleanly for watchdog/continuation
     reason = "time limit" if not should_continue() else "step limit"

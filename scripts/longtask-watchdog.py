@@ -44,6 +44,8 @@ MODEL              = os.environ.get("MODEL", "gemini-2.5-flash-preview-05-20")
 MAX_RETRIES        = int(os.environ.get("MAX_RETRIES", "3"))
 POLL_INTERVAL      = int(os.environ.get("POLL_INTERVAL", "30"))
 MAX_RUNTIME        = int(os.environ.get("MAX_RUNTIME_MINUTES", "340")) * 60
+MODEL_CALL_RETRIES = int(os.environ.get("MODEL_CALL_RETRIES", "6"))
+MODEL_RETRY_BASE_SECONDS = int(os.environ.get("MODEL_RETRY_BASE_SECONDS", "4"))
 START_TIME         = time.time()
 STATE_DIR          = "longtask_state"
 STATE_FILE         = f"{STATE_DIR}/{TASK_ID}.enc"
@@ -66,6 +68,77 @@ def append_evaluation(state, verdict, issues=None, suggestions=""):
         "suggestions": suggestions,
         "timestamp": utc_now(),
     })
+
+
+def ensure_review_channel(state):
+    return state.setdefault("reviewChannel", {
+        "runnerStatus": "working",
+        "runnerUpdatedAt": None,
+        "round": state.get("iteration", 1),
+        "watchdogDecision": None,
+        "watchdogUpdatedAt": None,
+        "evalNumber": 0,
+        "issues": [],
+        "suggestions": "",
+        "revisedPrompt": "",
+    })
+
+
+def try_shared_channel_evaluation(state):
+    review = ensure_review_channel(state)
+    runner_status = (review.get("runnerStatus") or "").strip().lower()
+    decision = (review.get("watchdogDecision") or "").strip().lower()
+
+    if state.get("status") != "waiting_review" or runner_status != "output_ready":
+        return None
+    if decision in ("approved", "needs_improvement"):
+        return "decision_pending_runner"
+
+    print("[watchdog] Detected runner output_ready via shared channel. Starting evaluation...")
+    evaluation = evaluate_runner_output(state)
+    issues = evaluation.get("issues", [])
+    suggestions = evaluation.get("suggestions", "")
+    revised_prompt = evaluation.get("revised_prompt", "")
+    deliverable_paths = state.get("deliverables", [])[-PROMPT_DELIVERABLE_LIMIT:]
+
+    if evaluation.get("verdict") == "needs_improvement" and EVAL_COUNT <= MAX_EVALUATIONS:
+        merged_prompt = build_revised_task_prompt(state, revised_prompt, suggestions, issues)
+        state["status"] = "rework_requested"
+        state["taskPrompt"] = merged_prompt
+        state["progress"] = max(0, state.get("progress", 0) - 20)
+        state["finalResult"] = None
+        state["error"] = None
+        state["latestWatchdogAdvice"] = {
+            "evalNumber": EVAL_COUNT,
+            "issues": issues,
+            "suggestions": suggestions,
+            "deliverablePaths": deliverable_paths,
+            "updatedAt": utc_now(),
+        }
+        append_evaluation(state, "needs_improvement", issues, suggestions)
+
+        review["watchdogDecision"] = "needs_improvement"
+        review["watchdogUpdatedAt"] = utc_now()
+        review["evalNumber"] = EVAL_COUNT
+        review["issues"] = issues
+        review["suggestions"] = suggestions
+        review["revisedPrompt"] = merged_prompt
+
+        save_task_state(state)
+        print("[watchdog] Evaluation result: needs_improvement written to shared channel.")
+        return "needs_improvement"
+
+    append_evaluation(state, "pass")
+    state["status"] = "completed"
+    review["watchdogDecision"] = "approved"
+    review["watchdogUpdatedAt"] = utc_now()
+    review["evalNumber"] = EVAL_COUNT
+    review["issues"] = []
+    review["suggestions"] = ""
+    review["revisedPrompt"] = ""
+    save_task_state(state)
+    print("[watchdog] Evaluation result: approved written to shared channel.")
+    return "approved"
 
 # ── GitHub API helpers ──────────────────────────────────────────────
 
@@ -204,8 +277,9 @@ def should_continue():
 
 # ── AI Model Call (for evaluation) ──────────────────────────────────
 
-def call_model(prompt, system_instruction=None, retries=3):
+def call_model(prompt, system_instruction=None, retries=None):
     """Call Gemini API for evaluation purposes."""
+    retries = retries or MODEL_CALL_RETRIES
     if not GEMINI_API_KEY:
         print("[eval] No GEMINI_API_KEY — skipping AI evaluation")
         return None
@@ -231,7 +305,9 @@ def call_model(prompt, system_instruction=None, retries=3):
         except Exception as e:
             print(f"[eval] Model call attempt {attempt+1}/{retries} failed: {e}")
             if attempt < retries - 1:
-                time.sleep(3 * (attempt + 1))
+                backoff = MODEL_RETRY_BASE_SECONDS * (2 ** attempt)
+                jitter = (attempt + 1) * 0.5
+                time.sleep(backoff + jitter)
     return None
 
 def read_deliverables(state):
@@ -393,6 +469,15 @@ def main():
             status = state.get("status", "")
             print(f"[state] Task status: {status}, progress: {state.get('progress', 0)}%, "
                   f"step: {state.get('currentStep', 0)}, iteration: {state.get('iteration', '?')}")
+
+            channel_result = try_shared_channel_evaluation(state)
+            if channel_result == "approved":
+                print("\n✅ Shared-channel evaluation approved. Watchdog exiting.")
+                return
+            if channel_result in ("needs_improvement", "decision_pending_runner"):
+                print(f"[watchdog] Shared-channel state: {channel_result}. Waiting {POLL_INTERVAL}s...")
+                time.sleep(POLL_INTERVAL)
+                continue
 
             # Note: do NOT return early on "completed" here.
             # Let it fall through to the run-completion handler (step 3)
