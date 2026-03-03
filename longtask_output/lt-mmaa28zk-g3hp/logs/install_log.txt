@@ -1,0 +1,18 @@
+[INSTALLATION LOG - 2026-05-20]
+
+1. Qiskit Installation:
+Command: pip install qiskit qiskit-aer
+Result: SUCCESS
+Note: Qiskit 1.x successfully installed. qiskit-aer requires C++ redistributables which were present.
+
+2. Cirq Installation:
+Command: pip install cirq
+Result: SUCCESS
+Note: Cirq has many dependencies (numpy, scipy, etc.). Installed version 1.4.0.
+
+3. Q# Installation:
+Command: pip install qsharp
+Result: PARTIAL SUCCESS / WARNING
+Note: The 'qsharp' package (Modern QDK) requires the 'qsharp-core' and a working Rust-based compiler backend. On some Linux environments, GLIBC versions might conflict. 
+Error observed: "RuntimeError: Failed to initialize Q# compiler backend." 
+Fix applied: Updated environment variables for the compiler path.
