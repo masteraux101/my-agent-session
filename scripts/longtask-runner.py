@@ -21,6 +21,13 @@ Environment variables (injected by the workflow):
 import json, os, sys, time, hashlib, base64, re
 import urllib.request, urllib.error, traceback
 
+# Force unbuffered stdout so GitHub Actions shows logs in real-time
+os.environ['PYTHONUNBUFFERED'] = '1'
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(line_buffering=True)
+
 # ── Config ──────────────────────────────────────────────────────────
 TASK_ID       = os.environ.get("TASK_ID", "unknown")
 TASK_PROMPT   = os.environ.get("TASK_PROMPT", "")

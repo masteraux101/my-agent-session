@@ -25,6 +25,13 @@ Environment variables (injected by the workflow):
 import json, os, sys, time, hashlib, base64
 import urllib.request, urllib.error, traceback
 
+# Force unbuffered stdout so GitHub Actions shows logs in real-time
+os.environ['PYTHONUNBUFFERED'] = '1'
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(line_buffering=True)
+
 # ── Config ──────────────────────────────────────────────────────────
 TASK_ID            = os.environ.get("TASK_ID", "")
 GITHUB_TOKEN       = os.environ.get("GITHUB_TOKEN", "")
@@ -181,14 +188,20 @@ def main():
     last_seen_run_id = None
     waiting_for_new_run = False
     wait_start = None
+    poll_count = 0
 
     while should_continue():
+        poll_count += 1
+        elapsed = time.time() - START_TIME
+        print(f"\n[poll #{poll_count}] elapsed={elapsed:.0f}s, remaining={time_remaining():.0f}s, retries={retry_count}/{MAX_RETRIES}")
+        sys.stdout.flush()
+
         # 1. Check task state — if completed, we're done
         state = load_task_state()
         if state:
             status = state.get("status", "")
             print(f"[state] Task status: {status}, progress: {state.get('progress', 0)}%, "
-                  f"step: {state.get('currentStep', 0)}")
+                  f"step: {state.get('currentStep', 0)}, iteration: {state.get('iteration', '?')}")
 
             if status == "completed":
                 print("\n✅ Task is completed! Watchdog exiting.")
@@ -197,6 +210,8 @@ def main():
             if status == "error" and retry_count >= MAX_RETRIES:
                 print(f"\n❌ Task errored and max retries ({MAX_RETRIES}) exhausted.")
                 return
+        else:
+            print("[state] Could not load task state (may not exist yet)")
 
         # 2. Check the latest run of the target workflow
         run = get_latest_run(TARGET_WORKFLOW)
@@ -220,17 +235,18 @@ def main():
         run_id = run["id"]
         run_status = run["status"]  # queued, in_progress, completed
         run_conclusion = run.get("conclusion")  # success, failure, cancelled, ...
+        run_created = run.get("created_at", "")
 
         # Track if this is a new run
         if last_seen_run_id != run_id:
             last_seen_run_id = run_id
             waiting_for_new_run = False
-            retry_count_for_this_run = 0
-            print(f"[watchdog] Tracking run #{run_id} ({run_status})")
+            print(f"[watchdog] Now tracking run #{run_id} (status={run_status}, created={run_created})")
 
         # 3. Handle different run states
         if run_status in ("queued", "in_progress"):
-            print(f"[watchdog] Run #{run_id} is {run_status}. Waiting...")
+            print(f"[watchdog] Run #{run_id} is {run_status}. Waiting {POLL_INTERVAL}s...")
+            sys.stdout.flush()
             time.sleep(POLL_INTERVAL)
             continue
 
@@ -238,11 +254,13 @@ def main():
             print(f"[watchdog] Run #{run_id} completed with conclusion: {run_conclusion}")
 
             # Re-read state after completion
-            time.sleep(5)  # Give git push a moment
+            print("[watchdog] Waiting 5s for state to settle, then re-reading...")
+            time.sleep(5)
             state = load_task_state()
 
             if state:
                 task_status = state.get("status", "")
+                print(f"[state] After run completion, task status: {task_status}")
 
                 if task_status == "completed":
                     print("\n✅ Task completed successfully!")
@@ -279,11 +297,39 @@ def main():
                         print(f"\n❌ Max retries exhausted ({MAX_RETRIES}).")
                         return
 
-            # Run completed but no clear state — check conclusion
+                # Status is 'pending' or 'running' but the run completed —
+                # the runner may have crashed before updating state.
+                if task_status in ("pending", "running"):
+                    if run_conclusion in ("failure", "cancelled", "timed_out"):
+                        retry_count += 1
+                        print(f"[watchdog] Task stuck at '{task_status}' and run {run_conclusion}. Retry {retry_count}/{MAX_RETRIES}...")
+                        if retry_count <= MAX_RETRIES:
+                            iteration = state.get("iteration", 1)
+                            dispatch_target(iteration)
+                            waiting_for_new_run = True
+                            wait_start = time.time()
+                            time.sleep(POLL_INTERVAL)
+                            continue
+                        else:
+                            state["status"] = "error"
+                            state["error"] = f"Runner crashed ({run_conclusion}) after {MAX_RETRIES} retries"
+                            try:
+                                save_task_state(state)
+                            except Exception:
+                                pass
+                            print(f"\n❌ Max retries exhausted.")
+                            return
+                    elif run_conclusion == "success":
+                        # Runner succeeded but state not updated — wait and recheck
+                        print("[watchdog] Run succeeded but state still pending/running. Rechecking in 15s...")
+                        time.sleep(15)
+                        continue
+
+            # Run completed but no state at all — check conclusion
             if run_conclusion in ("failure", "cancelled", "timed_out"):
                 retry_count += 1
                 if retry_count <= MAX_RETRIES:
-                    print(f"[watchdog] Run failed ({run_conclusion}). Retry {retry_count}/{MAX_RETRIES}...")
+                    print(f"[watchdog] Run failed ({run_conclusion}), no state found. Retry {retry_count}/{MAX_RETRIES}...")
                     iteration = (state.get("iteration", 1) if state else 1)
                     dispatch_target(iteration)
                     waiting_for_new_run = True
@@ -303,9 +349,8 @@ def main():
 
             if run_conclusion == "success":
                 # Success but task not completed/continuation — might be a race.
-                # Re-check state after a delay
-                print("[watchdog] Run succeeded but state unclear. Rechecking in 30s...")
-                time.sleep(30)
+                print("[watchdog] Run succeeded but state unclear. Rechecking in 15s...")
+                time.sleep(15)
                 state = load_task_state()
                 if state and state.get("status") == "completed":
                     print("\n✅ Task completed!")
@@ -317,8 +362,10 @@ def main():
                     wait_start = time.time()
                     continue
                 else:
-                    print("[watchdog] State still unclear. Waiting for next poll...")
+                    status_str = state.get('status', 'unknown') if state else 'no state'
+                    print(f"[watchdog] State still '{status_str}'. Will keep polling...")
 
+        sys.stdout.flush()
         time.sleep(POLL_INTERVAL)
 
     # Approaching watchdog time limit — self-heal
