@@ -1,11 +1,9 @@
-"""
-Bell State Generation - Cirq Implementation (2026 Standard)
-"""
 import cirq
 
 def create_bell_state():
     # Define qubits
-    q0, q1 = cirq.LineQubit.range(2)
+    q0 = cirq.GridQubit(0, 0)
+    q1 = cirq.GridQubit(0, 1)
     
     # Create circuit
     circuit = cirq.Circuit(
@@ -14,15 +12,14 @@ def create_bell_state():
         cirq.measure(q0, q1, key='result')
     )
     
-    print("--- Cirq Circuit ---")
+    print("--- Cirq Bell State Circuit ---")
     print(circuit)
     
     # Simulate
     simulator = cirq.Simulator()
-    result = simulator.run(circuit, repetitions=1000)
+    result = simulator.run(circuit, repetitions=1024)
     
-    # Print results
-    print("\nResults:")
+    print("Results:")
     print(result.histogram(key='result'))
 
 if __name__ == "__main__":
