@@ -327,6 +327,7 @@ def main():
 
     retry_count = 0
     last_seen_run_id = None
+    processed_run_ids = set()  # track runs we've already handled
     waiting_for_new_run = False
     wait_start = None
     poll_count = 0
@@ -344,9 +345,9 @@ def main():
             print(f"[state] Task status: {status}, progress: {state.get('progress', 0)}%, "
                   f"step: {state.get('currentStep', 0)}, iteration: {state.get('iteration', '?')}")
 
-            if status == "completed":
-                print("\n✅ Task is completed! Watchdog exiting.")
-                return
+            # Note: do NOT return early on "completed" here.
+            # Let it fall through to the run-completion handler (step 3)
+            # where evaluation logic actually runs.
 
             if status == "error" and retry_count >= MAX_RETRIES:
                 print(f"\n❌ Task errored and max retries ({MAX_RETRIES}) exhausted.")
@@ -392,6 +393,16 @@ def main():
             continue
 
         if run_status == "completed":
+            # Skip if we've already processed this run (avoid re-evaluation loops)
+            if run_id in processed_run_ids:
+                if waiting_for_new_run:
+                    print(f"[watchdog] Waiting for new run (old run #{run_id} already processed). Waiting {POLL_INTERVAL}s...")
+                else:
+                    print(f"[watchdog] Run #{run_id} already processed. Waiting {POLL_INTERVAL}s...")
+                sys.stdout.flush()
+                time.sleep(POLL_INTERVAL)
+                continue
+
             print(f"[watchdog] Run #{run_id} completed with conclusion: {run_conclusion}")
 
             # Re-read state after completion
@@ -442,6 +453,7 @@ def main():
                             iteration = state.get("iteration", 1) + 1
                             print(f"[eval] Re-dispatching Runner (iteration {iteration}) with revised task...")
                             dispatch_target(iteration)
+                            processed_run_ids.add(run_id)  # mark old run as processed
                             waiting_for_new_run = True
                             wait_start = time.time()
                             time.sleep(POLL_INTERVAL)
@@ -451,6 +463,7 @@ def main():
 
                     # Evaluation passed or no AI available
                     print("\n✅ Task completed and evaluation passed!")
+                    processed_run_ids.add(run_id)
                     # Record evaluation in state
                     state.setdefault("evaluations", []).append({
                         "evalNumber": EVAL_COUNT,
@@ -550,8 +563,8 @@ def main():
                 time.sleep(15)
                 state = load_task_state()
                 if state and state.get("status") == "completed":
-                    print("\n✅ Task completed!")
-                    return
+                    # Don't return early — let next poll iteration handle evaluation
+                    print("[watchdog] State now shows completed. Will evaluate on next poll...")
                 elif state and state.get("status") == "continuation":
                     next_iter = state.get("iteration", 1) + 1
                     dispatch_target(next_iter)
