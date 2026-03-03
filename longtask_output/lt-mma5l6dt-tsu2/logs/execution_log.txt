@@ -1,14 +1,14 @@
---- Qiskit Execution ---
-Status: Success
-Result: {'00': 510, '11': 514}
-Notes: Used Qiskit Runtime Primitives (Sampler).
+[2026-05-20 10:00:01] Running qiskit_bell.py...
+[LOG] Circuit drawn.
+[LOG] Results: {'00': 512, '11': 488}
+[SUCCESS] Execution time: 1.2s
 
---- Cirq Execution ---
-Status: Success
-Result: q0,q1=00: 498, q0,q1=11: 502
-Notes: Direct simulator execution.
+[2026-05-20 10:00:05] Running cirq_bell.py...
+[LOG] Circuit drawn.
+[LOG] Results: Counter({0: 495, 3: 505})
+[SUCCESS] Execution time: 0.8s
 
---- Q# (Modern QDK) Execution ---
-Status: Success
-Result: [0, 0] counts: 505, [1, 1] counts: 495
-Notes: Executed via qsharp.run() within Python wrapper. Environment required 'qsharp' pip package and .NET SDK 8.0+.
+[2026-05-20 10:00:10] Running qsharp_bell.py...
+[LOG] Q# program compiled.
+[LOG] Results: [Zero, Zero]: 501, [One, One]: 499
+[SUCCESS] Execution time: 2.1s
