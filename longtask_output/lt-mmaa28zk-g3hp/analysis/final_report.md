@@ -1,19 +1,12 @@
-# 2026 Quantum Programming Landscape Report
+# 2026 Quantum Framework Analysis Final Report
 
 ## Executive Summary
-As of mid-2026, the quantum programming landscape has matured into three distinct niches. Qiskit remains the dominant general-purpose framework, Cirq serves the research and hardware-specific community, and Q# has reinvented itself as a high-performance DSL for hybrid quantum-classical computing.
+In 2026, the quantum software landscape has matured into three distinct niches. Qiskit remains the "Python of Quantum," Cirq serves as the "Assembly for Quantum Physicists," and Q# has emerged as the "System Language for Hybrid Quantum-Classical Computing."
 
 ## Key Findings
-1. **Framework Convergence**: All three frameworks have moved away from "low-level" gate manipulation towards "primitive-based" or "operation-based" abstractions.
-2. **Performance**: Q#'s new compiler architecture shows a 10x improvement in compilation speed compared to its 2020 version.
-3. **Community Trends**: Qiskit's GitHub activity (Issues/PRs) is roughly 4x that of Cirq and Q# combined, indicating its role as the community hub.
+1. **Qiskit's Dominance**: By moving to version 2.0+, Qiskit has streamlined its API, making it the most accessible for new developers.
+2. **Q#'s Pivot**: The move to a Rust-based compiler has eliminated the heavy .NET dependency, making it a lightweight and formidable competitor in the cloud-quantum space.
+3. **Cirq's Specialization**: Cirq has doubled down on NISQ-era hardware characterization, making it indispensable for hardware developers but less attractive for algorithm-only researchers.
 
-## Recommendation
-- **For Beginners**: Start with Qiskit.
-- **For Hardware Researchers**: Use Cirq.
-- **For Scalable Hybrid Systems**: Invest in Q#.
-
-## Repository Structure
-- `scripts/`: Implementation of Bell States.
-- `logs/`: Verifiable execution and installation history.
-- `analysis/`: Deep dives into metrics.
+## Conclusion
+For most enterprise applications, **Qiskit** is the recommended starting point. For high-performance resource estimation, **Q#** is superior. For low-level gate control on specific hardware, **Cirq** remains the tool of choice.
