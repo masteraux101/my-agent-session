@@ -1,13 +1,18 @@
-# Quantum Frameworks Comparison 2026: Qiskit, Cirq, and Q#
+# Quantum Frameworks Comparison 2026
 
-## Project Overview
-This repository contains a comparative analysis of the three major quantum computing frameworks as of 2026: **IBM Qiskit**, **Google Cirq**, and **Microsoft Q# (Modern QDK)**. 
+This repository contains a comparative analysis of Qiskit, Cirq, and Q# (Modern QDK) as of 2026. It includes test scripts for generating a Bell State, execution logs, and an analysis of documentation and community health.
 
-The project includes:
-1.  **Bell State Scripts**: Functional code for generating a Bell State ($| \Phi^+ \rangle = \frac{|00\rangle + |11\rangle}{\sqrt{2}}$) in each framework.
-2.  **Documentation Review**: Analysis of the latest 2026 documentation sets.
-3.  **Performance & Community Metrics**: Error rate analysis and GitHub activity tracking.
+## Repository Structure
+- `scripts/`: Implementation of Bell State generation in three frameworks.
+- `logs/`: Captured execution output and error logs.
+- `analysis/`: Detailed reports on documentation, GitHub activity, and error rates.
 
-## Quick Start
-To run these scripts, ensure you have Python 3.11+ installed.
+## Framework Versions (Target 2026)
+- **Qiskit**: 1.x+ (using Primitives V2)
+- **Cirq**: 1.4+
+- **Q#**: Modern QDK (Azure Quantum Development Kit)
 
+## Documentation Links
+- [Qiskit Documentation](https://docs.quantum.ibm.com/)
+- [Cirq Documentation](https://quantumai.google/cirq)
+- [Q# / Azure Quantum Documentation](https://learn.microsoft.com/en-us/azure/quantum/)
