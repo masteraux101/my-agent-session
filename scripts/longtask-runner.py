@@ -43,6 +43,8 @@ STATE_DIR     = "longtask_state"
 STATE_FILE    = f"{STATE_DIR}/{TASK_ID}.enc"
 START_TIME    = time.time()
 REVIEW_POLL_INTERVAL = int(os.environ.get("REVIEW_POLL_INTERVAL", "15"))
+MODEL_SESSION_MAX_MESSAGES = int(os.environ.get("MODEL_SESSION_MAX_MESSAGES", "24"))
+MODEL_SESSION_ROLE = "runner"
 
 # ── Crypto (AES-256-GCM, compatible with BrowserAgent crypto.js) ──
 
@@ -84,6 +86,46 @@ def ensure_review_channel(state):
         "suggestions": "",
         "revisedPrompt": "",
     })
+
+
+def ensure_model_session(state):
+    sessions = state.setdefault("modelSessions", {})
+
+    # Backward compatibility: if old shared modelSession exists, seed this role once.
+    legacy = state.get("modelSession")
+    if legacy and MODEL_SESSION_ROLE not in sessions:
+        sessions[MODEL_SESSION_ROLE] = legacy
+
+    return sessions.setdefault(MODEL_SESSION_ROLE, {
+        "sessionId": f"{TASK_ID}-{MODEL_SESSION_ROLE}",
+        "messages": [],
+        "updatedAt": None,
+    })
+
+
+def _trim_text(text, limit=4000):
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n... (truncated)"
+
+
+def _append_session_turn(state, role, text, source):
+    session = ensure_model_session(state)
+    message = {
+        "role": role,
+        "parts": [{"text": _trim_text(text)}],
+        "meta": {
+            "source": source,
+            "at": utc_now(),
+        }
+    }
+    session.setdefault("messages", []).append(message)
+    max_kept = MODEL_SESSION_MAX_MESSAGES * 2
+    if len(session["messages"]) > max_kept:
+        session["messages"] = session["messages"][-max_kept:]
+    session["updatedAt"] = utc_now()
 
 
 def mark_output_ready_for_review(state, summary):
@@ -203,10 +245,21 @@ def save_state_to_repo(state, max_attempts=5):
 
 # ── AI Model Call with retry ────────────────────────────────────────
 
-def call_model(prompt, system_instruction=None, retries=3):
+def call_model(prompt, system_instruction=None, retries=3, state=None):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={API_KEY}"
 
-    contents = [{"parts": [{"text": prompt}]}]
+    if state is not None:
+        session = ensure_model_session(state)
+        history = session.get("messages", [])[-(MODEL_SESSION_MAX_MESSAGES * 2):]
+        current_turn = {
+            "role": "user",
+            "parts": [{"text": _trim_text(prompt)}],
+            "meta": {"source": "runner", "at": utc_now()},
+        }
+        contents = history + [current_turn]
+    else:
+        contents = [{"parts": [{"text": prompt}]}]
+
     body = {"contents": contents}
     if system_instruction:
         body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
@@ -223,6 +276,9 @@ def call_model(prompt, system_instruction=None, retries=3):
                         .get("parts", [{}])[0]
                         .get("text", ""))
                 if text:
+                    if state is not None:
+                        _append_session_turn(state, "user", prompt, "runner")
+                        _append_session_turn(state, "model", text, "model")
                     return text
                 print(f"[model] Empty response on attempt {attempt+1}")
         except Exception as e:
@@ -362,6 +418,27 @@ def print_watchdog_advice(advice):
     print()
 
 
+def build_review_injection_text(decision_payload):
+    issues = decision_payload.get("issues") or []
+    suggestions = decision_payload.get("suggestions") or ""
+    revised_prompt = decision_payload.get("revisedPrompt") or ""
+
+    issue_lines = "\n".join(f"- {item}" for item in issues) if issues else "- (none provided)"
+    suggestion_text = suggestions or "(none provided)"
+    revised_preview = revised_prompt[:800] if revised_prompt else "(none provided)"
+
+    return (
+        "\n\n=== WATCHDOG REVIEW (MUST APPLY IN THIS STEP) ===\n"
+        f"Evaluation #: {decision_payload.get('evalNumber', '?')}\n"
+        "Issues to fix:\n"
+        f"{issue_lines}\n\n"
+        "Improvement suggestions:\n"
+        f"{suggestion_text}\n\n"
+        "Revised task prompt from watchdog:\n"
+        f"{revised_preview}\n"
+    )
+
+
 def build_history_context(state):
     if not state["steps"]:
         return ""
@@ -498,6 +575,7 @@ def main():
     max_steps_per_iteration = 50
     consecutive_failures = 0
     max_consecutive_failures = 5
+    pending_review_injection = ""
 
     while should_continue() and step_count < max_steps_per_iteration:
         step_count += 1
@@ -505,15 +583,21 @@ def main():
 
         print(f"\n--- Step {state['currentStep']} (time left: {time_remaining():.0f}s) ---")
 
+        review_injection = pending_review_injection
+        if review_injection:
+            print("[review] Confirmed: watchdog review loaded and will be injected into this model request.")
+            pending_review_injection = ""
+
         prompt = (
             f"Task: {task_prompt}\n"
             f"{build_history_context(state)}\n\n"
+            f"{review_injection}\n"
             f"Now perform step {state['currentStep']}. "
             "Remember to end with the JSON progress block."
         )
 
         try:
-            response = call_model(prompt, system_inst)
+            response = call_model(prompt, system_inst, state=state)
         except Exception as e:
             print(f"[error] Model call exception: {e}")
             response = None
@@ -618,6 +702,17 @@ def main():
 
                     task_prompt = revised_prompt
                     state = latest
+                    print("\n[review] Watchdog decision received: needs_improvement")
+                    print(f"[review] Eval #{decision_payload.get('evalNumber', '?')}")
+                    if decision_payload.get("issues"):
+                        print("[review] Issues to fix:")
+                        for issue in decision_payload.get("issues", []):
+                            print(f"  - {issue}")
+                    if decision_payload.get("suggestions"):
+                        print(f"[review] Suggestions: {decision_payload.get('suggestions')}")
+
+                    pending_review_injection = build_review_injection_text(decision_payload)
+                    print("[review] Injection text prepared. Next model request will include watchdog feedback.")
                     print("[review] Watchdog requested rework. Continuing next round in the same runner process...")
                     break
 

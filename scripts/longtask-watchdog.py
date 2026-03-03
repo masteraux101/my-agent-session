@@ -54,6 +54,8 @@ EVAL_COUNT         = 0  # track how many evaluations we've done
 MAX_EVALUATIONS    = 3
 READ_DELIVERABLE_LIMIT = 5
 PROMPT_DELIVERABLE_LIMIT = 20
+MODEL_SESSION_MAX_MESSAGES = int(os.environ.get("MODEL_SESSION_MAX_MESSAGES", "24"))
+MODEL_SESSION_ROLE = "watchdog"
 
 
 def utc_now():
@@ -68,6 +70,46 @@ def append_evaluation(state, verdict, issues=None, suggestions=""):
         "suggestions": suggestions,
         "timestamp": utc_now(),
     })
+
+
+def ensure_model_session(state):
+    sessions = state.setdefault("modelSessions", {})
+
+    # Backward compatibility: if old shared modelSession exists, seed this role once.
+    legacy = state.get("modelSession")
+    if legacy and MODEL_SESSION_ROLE not in sessions:
+        sessions[MODEL_SESSION_ROLE] = legacy
+
+    return sessions.setdefault(MODEL_SESSION_ROLE, {
+        "sessionId": f"{TASK_ID}-{MODEL_SESSION_ROLE}",
+        "messages": [],
+        "updatedAt": None,
+    })
+
+
+def _trim_text(text, limit=4000):
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n... (truncated)"
+
+
+def _append_session_turn(state, role, text, source):
+    session = ensure_model_session(state)
+    message = {
+        "role": role,
+        "parts": [{"text": _trim_text(text)}],
+        "meta": {
+            "source": source,
+            "at": utc_now(),
+        }
+    }
+    session.setdefault("messages", []).append(message)
+    max_kept = MODEL_SESSION_MAX_MESSAGES * 2
+    if len(session["messages"]) > max_kept:
+        session["messages"] = session["messages"][-max_kept:]
+    session["updatedAt"] = utc_now()
 
 
 def ensure_review_channel(state):
@@ -277,7 +319,7 @@ def should_continue():
 
 # ── AI Model Call (for evaluation) ──────────────────────────────────
 
-def call_model(prompt, system_instruction=None, retries=None):
+def call_model(prompt, system_instruction=None, retries=None, state=None):
     """Call Gemini API for evaluation purposes."""
     retries = retries or MODEL_CALL_RETRIES
     if not GEMINI_API_KEY:
@@ -285,7 +327,18 @@ def call_model(prompt, system_instruction=None, retries=None):
         return None
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={GEMINI_API_KEY}"
 
-    contents = [{"parts": [{"text": prompt}]}]
+    if state is not None:
+        session = ensure_model_session(state)
+        history = session.get("messages", [])[-(MODEL_SESSION_MAX_MESSAGES * 2):]
+        current_turn = {
+            "role": "user",
+            "parts": [{"text": _trim_text(prompt)}],
+            "meta": {"source": "watchdog", "at": utc_now()},
+        }
+        contents = history + [current_turn]
+    else:
+        contents = [{"parts": [{"text": prompt}]}]
+
     body = {"contents": contents}
     if system_instruction:
         body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
@@ -301,6 +354,9 @@ def call_model(prompt, system_instruction=None, retries=None):
                         .get("content", {})
                         .get("parts", [{}])[0]
                         .get("text", ""))
+                if text and state is not None:
+                    _append_session_turn(state, "user", prompt, "watchdog")
+                    _append_session_turn(state, "model", text, "model")
                 return text
         except Exception as e:
             print(f"[eval] Model call attempt {attempt+1}/{retries} failed: {e}")
@@ -376,7 +432,7 @@ def evaluate_runner_output(state):
     )
 
     print(f"[eval] Evaluating Runner output (evaluation #{EVAL_COUNT})...")
-    response = call_model(eval_prompt)
+    response = call_model(eval_prompt, state=state)
     if not response:
         print("[eval] Could not get evaluation — defaulting to pass")
         return {"verdict": "pass", "issues": [], "suggestions": ""}
