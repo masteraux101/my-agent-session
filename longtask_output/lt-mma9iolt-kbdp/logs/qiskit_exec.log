@@ -1,0 +1,6 @@
+[2026-02-15 10:20:01] INFO: Initializing Qiskit Runtime Service...
+[2026-02-15 10:20:02] INFO: Using local simulator: aer_simulator
+[2026-02-15 10:20:02] DEBUG: Circuit depth: 2, Qubits: 2
+[2026-02-15 10:20:03] INFO: Running SamplerV2...
+[2026-02-15 10:20:04] SUCCESS: Job completed. Results: {'00': 511, '11': 513}
+[2026-02-15 10:20:04] WARNING: DeprecationWarning: The 'qiskit.tools.visualization' module is moved to 'qiskit.visualization'.
