@@ -99,26 +99,35 @@ def load_previous_state():
         print(f"[state] No previous state or decrypt failed: {e}")
         return None
 
-def save_state_to_repo(state):
+def save_state_to_repo(state, max_attempts=5):
     encrypted = encrypt_state(LONGTASK_KEY, json.dumps(state))
-
     url = f"{API_BASE}/repos/{REPO_FULL}/contents/{STATE_FILE}"
-    sha = None
-    try:
-        existing = gh_request("GET", url)
-        sha = existing.get("sha")
-    except Exception:
-        pass
 
-    payload = {
-        "message": f"[longtask] State: {TASK_ID} iter={ITERATION} step={state.get('currentStep', '?')}",
-        "content": base64.b64encode(encrypted.encode()).decode(),
-    }
-    if sha:
-        payload["sha"] = sha
+    for attempt in range(max_attempts):
+        sha = None
+        try:
+            existing = gh_request("GET", url)
+            sha = existing.get("sha")
+        except Exception:
+            pass
 
-    gh_request("PUT", url, payload)
-    print(f"[state] Saved: step={state.get('currentStep')}, progress={state.get('progress')}%")
+        payload = {
+            "message": f"[longtask] State: {TASK_ID} iter={ITERATION} step={state.get('currentStep', '?')}",
+            "content": base64.b64encode(encrypted.encode()).decode(),
+        }
+        if sha:
+            payload["sha"] = sha
+
+        try:
+            gh_request("PUT", url, payload)
+            print(f"[state] Saved: step={state.get('currentStep')}, progress={state.get('progress')}%")
+            return
+        except Exception as e:
+            if '409' in str(e) and attempt < max_attempts - 1:
+                print(f"[state] SHA conflict (attempt {attempt+1}), re-fetching and retrying...")
+                time.sleep(1 + attempt)
+                continue
+            raise
 
 # ── AI Model Call with retry ────────────────────────────────────────
 
@@ -191,9 +200,67 @@ def make_initial_state():
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "lastUpdateAt": None,
         "steps": [],
+        "deliverables": [],
         "finalResult": None,
         "error": None,
     }
+
+# ── Deliverable extraction & writing ────────────────────────────────
+
+DELIVERABLE_DIR = f"longtask_output/{TASK_ID}"
+
+def extract_deliverables(response):
+    """Extract file deliverables from model response.
+    Looks for specially tagged code blocks:
+      ```file:path/to/file.ext
+      content
+      ```
+    Returns list of {"path": ..., "content": ...}
+    """
+    results = []
+    pattern = r'```file:([^\n]+)\n(.*?)```'
+    for m in re.finditer(pattern, response, re.DOTALL):
+        filepath = m.group(1).strip()
+        content = m.group(2)
+        results.append({"path": filepath, "content": content})
+    return results
+
+def write_deliverable_to_repo(filepath, content):
+    """Write a deliverable file to the repo via Contents API."""
+    full_path = f"{DELIVERABLE_DIR}/{filepath}"
+    url = f"{API_BASE}/repos/{REPO_FULL}/contents/{full_path}"
+
+    sha = None
+    try:
+        existing = gh_request("GET", url)
+        sha = existing.get("sha")
+    except Exception:
+        pass
+
+    payload = {
+        "message": f"[longtask] Deliverable: {filepath} (task={TASK_ID})",
+        "content": base64.b64encode(content.encode()).decode(),
+    }
+    if sha:
+        payload["sha"] = sha
+
+    for attempt in range(3):
+        try:
+            gh_request("PUT", url, payload)
+            print(f"[deliverable] Written: {full_path}")
+            return full_path
+        except Exception as e:
+            if '409' in str(e) and attempt < 2:
+                # SHA conflict — re-fetch
+                try:
+                    existing = gh_request("GET", url)
+                    payload["sha"] = existing.get("sha")
+                except Exception:
+                    pass
+                time.sleep(1)
+                continue
+            print(f"[deliverable] Failed to write {full_path}: {e}")
+            raise
 
 # ── Main ────────────────────────────────────────────────────────────
 
@@ -229,25 +296,52 @@ def main():
     except Exception as e:
         print(f"[warn] Could not save initial state: {e}")
 
-    # System instruction
+    # System instruction — context-aware, strategy-driven
     system_inst = (
-        "You are executing a long-running task in iterative steps.\n"
+        "You are an autonomous AI agent executing a complex task iteratively.\n"
         f"Task ID: {TASK_ID}\n"
         f"Current iteration: {ITERATION}\n"
         f"Current step: {state['currentStep']}\n\n"
-        "Your job: Work on the task step by step. Each response should:\n"
-        "1. Analyze what has been done so far (from previous steps)\n"
-        "2. Perform the NEXT logical step of the task\n"
-        "3. End with a JSON block indicating your progress:\n\n"
+        "Your job is NOT a simple step-by-step loop. You must:\n"
+        "1. UNDERSTAND the full task context and the results from previous steps.\n"
+        "2. DYNAMICALLY PLAN what to do next based on what you've learned so far.\n"
+        "3. ADJUST your strategy if previous results reveal unexpected information.\n"
+        "4. PRODUCE deliverables — write actual code, data, or reports as output.\n\n"
+        "## Output Format\n"
+        "Each response should contain:\n"
+        "- Your analysis and reasoning about the current situation\n"
+        "- The actual work product for this step\n"
+        "- Any file deliverables using the special block format (see below)\n"
+        "- A JSON progress block at the end\n\n"
+        "## File Deliverables\n"
+        "To create/update files in the repo, use this exact format:\n"
+        "```file:relative/path/filename.ext\n"
+        "file content here\n"
+        "```\n\n"
+        "Examples:\n"
+        "```file:report.md\n"
+        "# Research Report\n...\n"
+        "```\n"
+        "```file:data/results.json\n"
+        '{\"key\": \"value\"}\n'
+        "```\n\n"
+        "## Progress JSON Block\n"
+        "End every response with:\n"
         "```json\n"
         '{"step": <number>, "totalSteps": <estimated_total>, "progress": <0-100>, '
-        '"summary": "what you did", "reflection": "what to do next", "done": false}\n'
+        '"summary": "what you accomplished", "reflection": "what you learned and what to do next", '
+        '"strategy_adjustment": "any changes to your approach based on findings", "done": false}\n'
         "```\n\n"
-        'When the task is FULLY complete, set "done": true and include the final result in "summary".\n\n'
-        "IMPORTANT: Be thorough but efficient. Each step should make meaningful progress."
+        'When the task is FULLY complete, set "done": true, include the final summary, '
+        "and write the final deliverable files.\n\n"
+        "IMPORTANT:\n"
+        "- Each step should make MEANINGFUL progress, not just outline plans.\n"
+        "- Actively reflect on previous results — if something didn't work, change approach.\n"
+        "- Produce concrete output (files, data, analysis), not just descriptions.\n"
+        "- If the task requires research/analysis, synthesize findings into a deliverable document."
     )
 
-    # Build history context
+    # Build history context — rich, includes strategy adjustments
     def build_history():
         if not state["steps"]:
             return ""
@@ -257,6 +351,15 @@ def main():
             lines.append(f"\nStep {s.get('step', '?')}: {s.get('summary', 'N/A')}")
             if s.get("reflection"):
                 lines.append(f"  Reflection: {s['reflection']}")
+            if s.get("strategy_adjustment"):
+                lines.append(f"  Strategy adjustment: {s['strategy_adjustment']}")
+            if s.get("deliverables_written"):
+                lines.append(f"  Files produced: {', '.join(s['deliverables_written'])}")
+        # Include deliverables summary
+        if state.get("deliverables"):
+            lines.append(f"\n=== Deliverables so far: {len(state['deliverables'])} files ===")
+            for d in state["deliverables"][-10:]:
+                lines.append(f"  - {d}")
         return "\n".join(lines)
 
     step_count = 0
@@ -300,12 +403,29 @@ def main():
         consecutive_failures = 0
         print(f"[model] Response: {len(response)} chars")
 
+        # Extract and write file deliverables
+        deliverables = extract_deliverables(response)
+        deliverables_written = []
+        for d in deliverables:
+            try:
+                written_path = write_deliverable_to_repo(d["path"], d["content"])
+                deliverables_written.append(written_path)
+                if written_path not in state.get("deliverables", []):
+                    state.setdefault("deliverables", []).append(written_path)
+            except Exception as e:
+                print(f"[warn] Failed to write deliverable {d['path']}: {e}")
+
+        if deliverables_written:
+            print(f"[deliverables] Wrote {len(deliverables_written)} files: {deliverables_written}")
+
         # Parse progress
         parsed = parse_progress(response)
         step_info = {
             "step": state["currentStep"],
             "summary": response[:300],
             "reflection": "",
+            "strategy_adjustment": "",
+            "deliverables_written": deliverables_written,
             "done": False,
         }
 
@@ -316,6 +436,8 @@ def main():
                 "progress": parsed.get("progress", 0),
                 "summary": parsed.get("summary", response[:300]),
                 "reflection": parsed.get("reflection", ""),
+                "strategy_adjustment": parsed.get("strategy_adjustment", ""),
+                "deliverables_written": deliverables_written,
                 "done": parsed.get("done", False),
             })
             state["totalSteps"] = parsed.get("totalSteps", state["totalSteps"])

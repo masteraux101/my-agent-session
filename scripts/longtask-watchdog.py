@@ -39,6 +39,8 @@ REPO_FULL          = os.environ.get("REPO_FULL", "")
 TARGET_WORKFLOW    = os.environ.get("TARGET_WORKFLOW", "")
 WATCHDOG_WORKFLOW  = os.environ.get("WATCHDOG_WORKFLOW", "")
 LONGTASK_KEY       = os.environ.get("LONGTASK_KEY", "")
+GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
+MODEL              = os.environ.get("MODEL", "gemini-2.5-flash-preview-05-20")
 MAX_RETRIES        = int(os.environ.get("MAX_RETRIES", "3"))
 POLL_INTERVAL      = int(os.environ.get("POLL_INTERVAL", "30"))
 MAX_RUNTIME        = int(os.environ.get("MAX_RUNTIME_MINUTES", "340")) * 60
@@ -46,6 +48,7 @@ START_TIME         = time.time()
 STATE_DIR          = "longtask_state"
 STATE_FILE         = f"{STATE_DIR}/{TASK_ID}.enc"
 API_BASE           = "https://api.github.com"
+EVAL_COUNT         = 0  # track how many evaluations we've done
 
 # ── GitHub API helpers ──────────────────────────────────────────────
 
@@ -104,22 +107,34 @@ def load_task_state():
         print(f"[state] Could not load state: {e}")
         return None
 
-def save_task_state(state):
+def save_task_state(state, max_attempts=5):
     encrypted = encrypt_state(LONGTASK_KEY, json.dumps(state))
     url = f"{API_BASE}/repos/{REPO_FULL}/contents/{STATE_FILE}"
-    sha = None
-    try:
-        existing = gh_request("GET", url)
-        sha = existing.get("sha")
-    except Exception:
-        pass
-    payload = {
-        "message": f"[watchdog] State update: {TASK_ID}",
-        "content": base64.b64encode(encrypted.encode()).decode(),
-    }
-    if sha:
-        payload["sha"] = sha
-    gh_request("PUT", url, payload)
+
+    for attempt in range(max_attempts):
+        sha = None
+        try:
+            existing = gh_request("GET", url)
+            sha = existing.get("sha")
+        except Exception:
+            pass
+
+        payload = {
+            "message": f"[watchdog] State update: {TASK_ID}",
+            "content": base64.b64encode(encrypted.encode()).decode(),
+        }
+        if sha:
+            payload["sha"] = sha
+
+        try:
+            gh_request("PUT", url, payload)
+            return
+        except Exception as e:
+            if '409' in str(e) and attempt < max_attempts - 1:
+                print(f"[state] SHA conflict (attempt {attempt+1}), re-fetching and retrying...")
+                time.sleep(1 + attempt)
+                continue
+            raise
 
 # ── Workflow helpers ────────────────────────────────────────────────
 
@@ -169,6 +184,132 @@ def time_remaining():
 
 def should_continue():
     return time_remaining() > 120
+
+# ── AI Model Call (for evaluation) ──────────────────────────────────
+
+def call_model(prompt, system_instruction=None, retries=3):
+    """Call Gemini API for evaluation purposes."""
+    if not GEMINI_API_KEY:
+        print("[eval] No GEMINI_API_KEY — skipping AI evaluation")
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={GEMINI_API_KEY}"
+
+    contents = [{"parts": [{"text": prompt}]}]
+    body = {"contents": contents}
+    if system_instruction:
+        body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+    body["generationConfig"] = {"temperature": 0.3, "maxOutputTokens": 4096}
+
+    for attempt in range(retries):
+        try:
+            data = json.dumps(body).encode()
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read().decode())
+                text = (result.get("candidates", [{}])[0]
+                        .get("content", {})
+                        .get("parts", [{}])[0]
+                        .get("text", ""))
+                return text
+        except Exception as e:
+            print(f"[eval] Model call attempt {attempt+1}/{retries} failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(3 * (attempt + 1))
+    return None
+
+def read_deliverables(state):
+    """Read deliverable file contents from repo for evaluation."""
+    deliverables = state.get("deliverables", [])
+    if not deliverables:
+        return ""
+    results = []
+    for path in deliverables[-5:]:  # Read last 5 deliverables
+        url = f"{API_BASE}/repos/{REPO_FULL}/contents/{path}"
+        try:
+            data = gh_request("GET", url)
+            content = base64.b64decode(data["content"]).decode()
+            # Truncate large files
+            if len(content) > 2000:
+                content = content[:2000] + "\n... (truncated)"
+            results.append(f"=== {path} ===\n{content}")
+        except Exception as e:
+            results.append(f"=== {path} === (could not read: {e})")
+    return "\n\n".join(results)
+
+def evaluate_runner_output(state):
+    """Use AI to evaluate Runner's completed output.
+    Returns: {"verdict": "pass"|"needs_improvement", "issues": [...], "suggestions": "...", "revised_prompt": "..."}
+    """
+    global EVAL_COUNT
+    EVAL_COUNT += 1
+
+    if EVAL_COUNT > 3:
+        print("[eval] Already evaluated 3 times — accepting result to avoid infinite loop.")
+        return {"verdict": "pass", "issues": [], "suggestions": ""}
+
+    task_prompt = state.get("taskPrompt", "")
+    steps_summary = ""
+    for s in state.get("steps", [])[-10:]:
+        steps_summary += f"\nStep {s.get('step', '?')}: {s.get('summary', 'N/A')}"
+        if s.get("reflection"):
+            steps_summary += f"\n  Reflection: {s['reflection']}"
+
+    deliverables_text = read_deliverables(state)
+    final_result = state.get("finalResult", "")
+
+    eval_prompt = (
+        f"You are evaluating whether an AI agent completed a task correctly.\n\n"
+        f"## Original Task\n{task_prompt}\n\n"
+        f"## Steps Taken ({len(state.get('steps', []))} total)\n{steps_summary}\n\n"
+        f"## Deliverables Produced\n{deliverables_text or '(none)'}\n\n"
+        f"## Final Result\n{final_result or '(none)'}\n\n"
+        f"## Your Evaluation\n"
+        f"Evaluate the output quality:\n"
+        f"1. Is the task fully completed as requested?\n"
+        f"2. Are there any gaps, errors, or missing components?\n"
+        f"3. Is the quality of deliverables acceptable?\n"
+        f"4. What specific improvements are needed, if any?\n\n"
+        f"Respond with a JSON block:\n"
+        f"```json\n"
+        f'{{"verdict": "pass" or "needs_improvement", '
+        f'"issues": ["issue1", "issue2"], '
+        f'"suggestions": "specific improvement instructions", '
+        f'"revised_prompt": "if needs_improvement, the revised/supplemented task prompt for the runner to re-execute"}}\n'
+        f"```\n\n"
+        f"IMPORTANT: Only mark as 'needs_improvement' if there are SIGNIFICANT gaps. "
+        f"Minor formatting issues should be 'pass'. "
+        f"The 'revised_prompt' should include the ORIGINAL task plus specific instructions to fix the issues."
+    )
+
+    print(f"[eval] Evaluating Runner output (evaluation #{EVAL_COUNT})...")
+    response = call_model(eval_prompt)
+    if not response:
+        print("[eval] Could not get evaluation — defaulting to pass")
+        return {"verdict": "pass", "issues": [], "suggestions": ""}
+
+    # Parse evaluation JSON
+    import re
+    m = re.search(r'```json\s*\n(.*?)```', response, re.DOTALL)
+    if m:
+        try:
+            result = json.loads(m.group(1).strip())
+            print(f"[eval] Verdict: {result.get('verdict', '?')}, Issues: {result.get('issues', [])}")
+            return result
+        except json.JSONDecodeError:
+            pass
+
+    # Try naked JSON
+    m = re.search(r'\{[^{}]*"verdict"\s*:.*?\}', response, re.DOTALL)
+    if m:
+        try:
+            result = json.loads(m.group(0))
+            print(f"[eval] Verdict: {result.get('verdict', '?')}")
+            return result
+        except json.JSONDecodeError:
+            pass
+
+    print(f"[eval] Could not parse evaluation response — defaulting to pass")
+    return {"verdict": "pass", "issues": [], "suggestions": ""}
 
 # ── Main watchdog loop ──────────────────────────────────────────────
 
@@ -263,7 +404,63 @@ def main():
                 print(f"[state] After run completion, task status: {task_status}")
 
                 if task_status == "completed":
-                    print("\n✅ Task completed successfully!")
+                    # ── Evaluate Runner's output ──
+                    print("\n[watchdog] Runner reports task completed. Evaluating output quality...")
+                    evaluation = evaluate_runner_output(state)
+
+                    if evaluation.get("verdict") == "needs_improvement" and EVAL_COUNT <= 3:
+                        issues = evaluation.get("issues", [])
+                        revised_prompt = evaluation.get("revised_prompt", "")
+                        suggestions = evaluation.get("suggestions", "")
+
+                        print(f"[eval] Output needs improvement:")
+                        for issue in issues:
+                            print(f"  - {issue}")
+                        print(f"[eval] Suggestions: {suggestions}")
+
+                        if revised_prompt:
+                            # Modify state: update prompt with evaluation feedback, reset for re-execution
+                            state["status"] = "running"
+                            state["taskPrompt"] = revised_prompt
+                            state["progress"] = max(0, state.get("progress", 0) - 20)
+                            state["finalResult"] = None
+                            state["error"] = None
+                            state.setdefault("evaluations", []).append({
+                                "evalNumber": EVAL_COUNT,
+                                "verdict": "needs_improvement",
+                                "issues": issues,
+                                "suggestions": suggestions,
+                                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            })
+
+                            try:
+                                save_task_state(state)
+                            except Exception as e:
+                                print(f"[warn] Failed to save revised state: {e}")
+
+                            # Re-dispatch runner with the revised prompt
+                            iteration = state.get("iteration", 1) + 1
+                            print(f"[eval] Re-dispatching Runner (iteration {iteration}) with revised task...")
+                            dispatch_target(iteration)
+                            waiting_for_new_run = True
+                            wait_start = time.time()
+                            time.sleep(POLL_INTERVAL)
+                            continue
+                        else:
+                            print("[eval] No revised prompt provided — accepting as complete.")
+
+                    # Evaluation passed or no AI available
+                    print("\n✅ Task completed and evaluation passed!")
+                    # Record evaluation in state
+                    state.setdefault("evaluations", []).append({
+                        "evalNumber": EVAL_COUNT,
+                        "verdict": "pass",
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    })
+                    try:
+                        save_task_state(state)
+                    except Exception:
+                        pass
                     return
 
                 if task_status == "continuation":
