@@ -1,0 +1,5 @@
+[2026-02-15 10:21:15] INFO: Cirq version 1.5.0 initialized.
+[2026-02-15 10:21:15] DEBUG: Creating Circuit with 2 qubits.
+[2026-02-15 10:21:15] INFO: Gates: [H(q0), CNOT(q0, q1), Measure(q0, q1)]
+[2026-02-15 10:21:16] INFO: Simulation started (repetitions=1000).
+[2026-02-15 10:21:16] SUCCESS: Counter({'00': 489, '11': 511})
