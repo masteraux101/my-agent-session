@@ -1,28 +1,27 @@
-"""
-Bell State Generation - Cirq (2026 Standard)
-"""
 import cirq
 
 def create_bell_state():
-    # Define qubits
-    q0 = cirq.GridQubit(0, 0)
-    q1 = cirq.GridQubit(0, 1)
-    
-    # Create circuit
+    """
+    Generates a Bell State |Φ+> using Cirq.
+    """
+    # Define two qubits
+    q0, q1 = cirq.LineQubit.range(2)
+
+    # Create a circuit
     circuit = cirq.Circuit(
-        cirq.H(q0),
-        cirq.CNOT(q0, q1),
-        cirq.measure(q0, q1, key='result')
+        cirq.H(q0),             # Hadamard gate on q0
+        cirq.CNOT(q0, q1),      # CNOT gate with q0 as control
+        cirq.measure(q0, q1, key='result') # Measure both
     )
-    
+
     print("--- Cirq Bell State Circuit ---")
     print(circuit)
-    
+
     # Simulate the circuit
     simulator = cirq.Simulator()
     result = simulator.run(circuit, repetitions=1000)
-    
-    print("\nResults Summary:")
+
+    print("\nMeasurement Results:")
     print(result.histogram(key='result'))
     return result
 
