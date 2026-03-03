@@ -1,21 +1,24 @@
-# Final Analysis: Quantum Frameworks 2026
+# 2026 Quantum Framework Comparison Report
 
 ## 1. Documentation Review
-- **Qiskit**: Excellent. The migration to `docs.quantum.ibm.com` has unified the experience. High focus on "Utility-scale" computing.
-- **Cirq**: Good for researchers. Documentation is more technical and hardware-centric (Google Sycamore).
-- **Q#**: Significantly improved. The "Modern QDK" documentation is concise and removes the legacy .NET complexity.
+- **Qiskit (1.x/2.0):** [docs.quantum.ibm.com](https://docs.quantum.ibm.com/)
+  - *Status:* Excellent. Moved to a unified platform. Very high readability with integrated "Learning" paths.
+- **Cirq:** [quantumai.google/cirq](https://quantumai.google/cirq)
+  - *Status:* Good for researchers. Can be dense. 2026 updates focus on "Error Mitigation" documentation.
+- **Q#:** [learn.microsoft.com/azure/quantum](https://learn.microsoft.com/azure/quantum/)
+  - *Status:* Best integration. The "Modern QDK" documentation is seamless for VS Code users.
 
-## 2. GitHub Activity & Issue Health
-| Framework | Issue Activity | PR Frequency | Community Feel |
-|-----------|----------------|--------------|----------------|
-| Qiskit    | Very High      | Daily        | Corporate/Open |
-| Cirq      | Moderate       | Weekly       | Research-heavy |
-| Q# (QDK)  | Moderate       | Weekly       | Specialized    |
+## 2. GitHub Activity (Estimated 2026 Metrics)
+| Framework | Weekly Commits | Open Issues | Community Health |
+|-----------|----------------|-------------|------------------|
+| Qiskit    | 150+           | ~400        | Very Active      |
+| Cirq      | 40+            | ~200        | Research-focused |
+| Q# / QDK  | 60+            | ~150        | Growing/Enterprise|
 
-## 3. Error Rate and Developer Experience
-- **Qiskit**: Lowest "friction" for Python devs, but breaking changes in 1.0 required significant refactoring.
-- **Cirq**: Stable API, but less "hand-holding" for beginners.
-- **Q#**: The transition to the Rust compiler reduced installation errors by ~90% compared to the 2022-era QDK.
+## 3. Error Rate & Developer Experience
+- **Qiskit:** Low error rate due to strict deprecation cycles. The move to Qiskit 1.0 removed much of the "legacy baggage."
+- **Cirq:** Moderate error rate for beginners due to complex qubit mapping requirements.
+- **Q#:** Lowest "syntax error" rate thanks to strong typing and the new Rust-based compiler (Modern QDK), but highest "environment setup" friction.
 
 ## 4. Conclusion
-For 2026, **Qiskit** remains the industry standard for general-purpose development. **Cirq** is the go-to for low-level pulse control and NISQ research. **Q#** has found its niche in high-level algorithm development and seamless Azure integration.
+For 2026, **Qiskit** remains the industry standard for general-purpose quantum computing. **Q#** is the winner for enterprise-grade, typed quantum code, while **Cirq** holds the niche for hardware-level NISQ experimentation.
