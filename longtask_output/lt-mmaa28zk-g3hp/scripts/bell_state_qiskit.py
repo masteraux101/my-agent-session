@@ -1,30 +1,32 @@
 """
-Bell State Generation in Qiskit (2026 Standard)
-Generates the state: (|00> + |11>) / sqrt(2)
+Bell State Generation - Qiskit (2026 Standard)
+Using Qiskit Primitives for execution.
 """
 from qiskit import QuantumCircuit
-from qiskit_aer import AerSimulator
+from qiskit.primitives import Sampler
 
-def run_bell_state():
-    # Initialize a 2-qubit circuit
+def create_bell_state():
+    # Create a Quantum Circuit with 2 qubits
     qc = QuantumCircuit(2)
     
-    # Apply Hadamard to qubit 0
+    # Apply H gate to qubit 0
     qc.h(0)
-    # Apply CNOT with control 0 and target 1
+    # Apply CNOT gate with control 0 and target 1
     qc.cx(0, 1)
     
-    # Measure both qubits
+    # Add measurement
     qc.measure_all()
     
-    # Execute using Aer Simulator
-    simulator = AerSimulator()
-    job = simulator.run(qc, shots=1024)
-    result = job.result()
-    counts = result.get_counts()
+    print("--- Qiskit Bell State Circuit ---")
+    print(qc.draw(output='text'))
     
-    print("Qiskit Bell State Execution Results:")
-    print(counts)
+    # Execute using Sampler (2026 standard primitive)
+    sampler = Sampler()
+    job = sampler.run(qc)
+    result = job.result()
+    
+    print(f"Quasi-distribution: {result.quasi_dists[0]}")
+    return result
 
 if __name__ == "__main__":
-    run_bell_state()
+    create_bell_state()
