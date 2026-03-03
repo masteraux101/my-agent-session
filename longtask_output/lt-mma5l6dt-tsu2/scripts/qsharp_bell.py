@@ -1,10 +1,11 @@
 import qsharp
 
-# Note: Modern Q# (Azure Quantum Development Kit) allows inline Q# in Python
-def create_bell_state():
-    qsharp.init(project_root = '.') # Initialize Q# workspace
-    
-    bell_code = """
+# Define the Q# code as a string (Modern QDK style)
+qsharp_code = """
+namespace BellState {
+    open Microsoft.Quantum.Diagnostics;
+    open Microsoft.Quantum.Measurement;
+
     operation CreateBellState() : (Result, Result) {
         use (q0, q1) = (Qubit(), Qubit());
         H(q0);
@@ -14,18 +15,14 @@ def create_bell_state():
         Reset(q1);
         return res;
     }
-    """
-    # In the modern QDK, we can compile and run directly
-    # For a simple test, we'll use the qsharp.eval
-    result = qsharp.eval("CreateBellState()")
-    return result
+}
+"""
 
-if __name__ == "__main__":
-    print("Running Q# (Modern QDK) Bell State...")
-    try:
-        # Note: This requires the 'qsharp' python package and .NET SDK / QDK backend
-        # In a headless environment, this might need specific setup
-        result = create_bell_state()
-        print(f"Result: {result}")
-    except Exception as e:
-        print(f"Error running Q#: {e}. Ensure 'qsharp' and 'qsharp-widgets' are installed.")
+# In Modern QDK, we can compile and run directly
+qsharp.compile(qsharp_code)
+results = []
+for _ in range(100):
+    res = qsharp.eval("BellState.CreateBellState()")
+    results.append(str(res))
+
+print(f"Q# Bell State Sample Results: {results[:5]} ...")
