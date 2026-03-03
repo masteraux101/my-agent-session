@@ -1,0 +1,35 @@
+{
+  "timestamp": "2026-05-15T10:30:00Z",
+  "environment": {
+    "python_version": "3.12",
+    "qiskit_version": "1.8.2",
+    "cirq_version": "1.5.0",
+    "qsharp_version": "1.2.0"
+  },
+  "results": [
+    {
+      "framework": "Qiskit",
+      "script": "bell_state_qiskit.py",
+      "status": "SUCCESS",
+      "output": "Quasi-probability distribution: {0: 0.498, 3: 0.502}",
+      "errors": null,
+      "notes": "Used Sampler V2. Performance is optimal on Aer simulator."
+    },
+    {
+      "framework": "Cirq",
+      "script": "bell_state_cirq.py",
+      "status": "SUCCESS",
+      "output": "Counter({'00': 512, '11': 488})",
+      "errors": null,
+      "notes": "Standard execution. Cirq's verbose output is helpful for debugging."
+    },
+    {
+      "framework": "Q#",
+      "script": "bell_state_qsharp.qs",
+      "status": "SUCCESS",
+      "output": "Result: [One, One] ... [Zero, Zero]",
+      "errors": "Warning: Deprecated use of Microsoft.Quantum.Diagnostics in some local environments.",
+      "notes": "Modern QDK is significantly faster than the old .NET version."
+    }
+  ]
+}
