@@ -1,0 +1,42 @@
+# browseragent-watchdog: lt-mma2quyw-hv87
+name: "Watchdog: lt-mma2quyw-hv87"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'Task ID to monitor'
+        required: false
+        default: 'lt-mma2quyw-hv87'
+      target_workflow:
+        description: 'Target workflow file'
+        required: false
+        default: 'longtask-lt-mma2quyw-hv87.yml'
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install cryptography
+
+      - name: Run watchdog
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL: ${{ github.repository }}
+          TASK_ID: "${{ inputs.task_id || 'lt-mma2quyw-hv87' }}"
+          TARGET_WORKFLOW: "${{ inputs.target_workflow || 'longtask-lt-mma2quyw-hv87.yml' }}"
+          WATCHDOG_WORKFLOW: "watchdog-lt-mma2quyw-hv87.yml"
+          LONGTASK_KEY: ${{ secrets.LONGTASK_KEY }}
+          MAX_RETRIES: "3"
+          POLL_INTERVAL: "30"
+          MAX_RUNTIME_MINUTES: "340"
+        run: python scripts/longtask-watchdog.py
