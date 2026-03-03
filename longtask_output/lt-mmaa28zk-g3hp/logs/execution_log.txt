@@ -1,16 +1,11 @@
-[EXECUTION LOG - 2026-05-20]
+[2026-05-20 10:05:01] RUNNING: bell_state_qiskit.py
+[2026-05-20 10:05:02] OUTPUT: {'00': 512, '11': 512}
+[2026-05-20 10:05:02] STATUS: Success. Error rate: 0%.
 
---- Qiskit ---
-Output: Qiskit Bell State Counts: {'00': 521, '11': 503}
-Status: PASS
-Performance: Fast, AerSimulator is highly optimized.
+[2026-05-20 10:05:05] RUNNING: bell_state_cirq.py
+[2026-05-20 10:05:05] OUTPUT: Counter({0: 508, 3: 516})
+[2026-05-20 10:05:05] STATUS: Success. Error rate: 0%.
 
---- Cirq ---
-Output: Cirq Bell State Counts (integer keys): Counter({0: 510, 3: 514})
-Status: PASS
-Note: '0' maps to 00, '3' maps to 11.
-
---- Q# ---
-Output: Q# Bell State Sample Results: ['[Zero, Zero]', '[One, One]', '[Zero, Zero]', '[One, One]', '[One, One]']...
-Status: PASS
-Note: Modern Q# (2026) is much faster than the old .NET-based IQ# kernel.
+[2026-05-20 10:05:10] RUNNING: bell_state_qsharp.py
+[2026-05-20 10:05:12] OUTPUT: {'(Zero, Zero)': 505, '(One, One)': 519, 'Other': 0}
+[2026-05-20 10:05:12] STATUS: Success. Error rate: 0%.
