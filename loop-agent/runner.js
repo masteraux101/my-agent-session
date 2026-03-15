@@ -1641,7 +1641,13 @@ CROP_REGION: {"x": <left>, "y": <top>, "width": <width>, "height": <height>}`;
     schema: z.object({}),
   }));
 
-  // ── Explorer Sub-Agent tool (dynamic code generation & execution) ──
+  // ── Browser Agent tool (ReAct browser automation) ──
+  if (llm) {
+    const { createBrowserTool } = require('./browser-agent');
+    tools.push(createBrowserTool(llm, notifyFn, sendTelegramPhoto));
+  }
+
+  // ── Explorer Sub-Agent tool (code generation & execution) ──
   if (llm) {
     const { createExplorerTool } = require('./sub-agent');
     tools.push(createExplorerTool(llm, repoStore, notifyFn, sendTelegramPhoto));
