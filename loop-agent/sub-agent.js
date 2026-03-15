@@ -1,17 +1,23 @@
 /**
  * sub-agent.js — Explorer Sub-Agent (Subgraph of the main AgentGraph)
  *
- * A self-contained subgraph that handles tasks requiring dynamic code generation:
+ * A self-contained subgraph that handles tasks requiring dynamic code generation
+ * or browser automation:
  *   1. Semantic Gap  — no existing tool can fulfill the request
  *   2. Execution Failure — a standard tool crashed, needs code-level fix
  *   3. Complex Reasoning — multi-step logic that can't be pre-defined in tools
  *
- * Graph topology:
- *   Entry → Planner → Coder → Executor → Reflector
- *                       ↑                    ↓
- *                       └── retry (< max) ───┘
- *                                             ↓
- *                                      Human Wait (>= max)
+ * Two execution paths:
+ *
+ *   Browser tasks (ReAct loop — see browser-agent.js):
+ *     Entry → Planner → BrowserAgentLoop (Observe → Think → Act → Verify)
+ *     Uses atomic tools (click_element, input_text, scroll_page, etc.)
+ *     instead of generating full Playwright scripts.
+ *
+ *   Non-browser tasks (code generation):
+ *     Entry → Planner → Coder → Executor → Reflector
+ *                         ↑                    ↓
+ *                         └── retry (< max) ───┘
  *
  * Integration: Exposed as the `explore_task` tool within the parent AgentGraph's
  * ReAct executor. The parent agent's LLM routes to this tool when it detects
@@ -368,19 +374,66 @@ Be concise and focus on what's relevant to the failed task.`;
       };
     }
 
-    // ── Nodes B→C→D loop: Coder → Executor → Reflector ──
-    let retries = 0;
-    const errorHistory = [];
+    // ── Route: Browser tasks use ReAct loop, others use Coder→Executor ──
     const isBrowser = this._isBrowserTask(plan, task);
     const isLogin = this._isLoginTask(task);
-    if (isBrowser) console.log(`[Explorer] Browser task detected — diagnostics enabled`);
-    if (isLogin) console.log(`[Explorer] Login task detected — verification enabled`);
 
-    // For browser tasks: prepare state persistence directory
+    if (isBrowser && plan.language === 'javascript') {
+      // ── ReAct Browser Agent path ──
+      // Instead of generating a full Playwright script, drive the browser
+      // step-by-step with atomic actions in an Observe→Think→Act→Verify loop.
+      console.log(`[Explorer] Browser task detected → delegating to ReAct BrowserAgentLoop`);
+      if (isLogin) console.log(`[Explorer] Login task detected`);
+
+      try {
+        const { BrowserAgentLoop } = require('./browser-agent');
+        const browserAgent = new BrowserAgentLoop({
+          llm: this.llm,
+          maxSteps: 25,
+          notifyFn: this.notifyFn,
+          sendPhotoFn: context._sendPhotoFn || null,
+        });
+
+        const browserResult = await browserAgent.run(task, context);
+
+        if (browserResult.success) {
+          console.log(`[Explorer] ✓ Browser agent completed (${browserResult.duration}ms, ${browserResult.actionHistory?.length || 0} steps)`);
+          return {
+            success: true,
+            type: 'execution',
+            result: browserResult.result,
+            output: browserResult.actionHistory
+              ? browserResult.actionHistory.map(h => `Step ${h.step}: ${h.description}`).join('\n')
+              : '',
+            screenshotPath: browserResult.screenshotPath,
+            duration: browserResult.duration,
+          };
+        }
+
+        // Browser agent failed — report back
+        console.log(`[Explorer] ✗ Browser agent failed: ${browserResult.type}`);
+        await this._notify(`❌ Browser agent failed (${browserResult.type}): ${(browserResult.result || '').slice(0, 300)}`);
+        return {
+          success: false,
+          type: browserResult.type === 'max_steps' ? 'max_retries' : 'human_needed',
+          result: browserResult.result,
+          errorHistory: browserResult.actionHistory || [],
+          duration: browserResult.duration,
+        };
+      } catch (e) {
+        console.error(`[Explorer] BrowserAgentLoop error: ${e.message}`);
+        // Fall through to code-generation path as last resort
+        console.log(`[Explorer] Falling back to code-generation path`);
+      }
+    }
+
+    // ── Code-generation path (non-browser tasks, or browser fallback) ──
+    let retries = 0;
+    const errorHistory = [];
     if (isBrowser) {
+      console.log(`[Explorer] Browser task (fallback code-gen path)`);
       const statePath = this._getBrowserStatePath();
       context._browserStatePath = statePath;
-      console.log(`[Explorer] Browser state path: ${statePath}`);
     }
 
     while (retries < this.maxRetries) {
@@ -396,7 +449,6 @@ Be concise and focus on what's relevant to the failed task.`;
       console.log(`[Explorer] Execution: exit=${execResult.exitCode}, stdout=${execResult.stdout.length}c, stderr=${execResult.stderr.length}c`);
 
       // ── Browser diagnostics on failure ──
-      // When a browser task fails, capture page HTML + screenshot for richer context.
       let screenshotDesc = '';
       let pageHtml = '';
       if (!execResult.success && isBrowser) {
@@ -407,28 +459,18 @@ Be concise and focus on what's relevant to the failed task.`;
             console.log(`[Explorer] Running browser diagnostics for ${diagUrl}...`);
             const diag = await this._capturePageDiagnostics(diagUrl);
             pageHtml = diag.html || '';
-
-            // Analyze screenshot with vision model for visual advice
             if (diag.screenshotPath) {
               screenshotDesc = await this._analyzeWithVision(diag.screenshotPath, task);
             }
           } catch (diagErr) {
             console.warn(`[Explorer] Browser diagnostics error: ${diagErr.message}`);
           }
-
-          // Feed HTML into context for subsequent Coder iterations
-          if (pageHtml) {
-            context._pageHtml = pageHtml;
-          }
-          if (screenshotDesc) {
-            context._visionAdvice = screenshotDesc;
-          }
+          if (pageHtml) context._pageHtml = pageHtml;
+          if (screenshotDesc) context._visionAdvice = screenshotDesc;
         }
       }
 
       // ── Post-execution verification for browser success claims ──
-      // When the generated code claims success on a browser task (especially login),
-      // independently verify by opening the URL with saved browser state.
       let verificationOverride = null;
       if (execResult.success && isBrowser) {
         const urlMatch = task.match(/https?:\/\/\S+/i);
@@ -437,29 +479,25 @@ Be concise and focus on what's relevant to the failed task.`;
           try {
             console.log(`[Explorer] Running post-execution verification for ${verifyUrl}...`);
             const verify = await this._verifyBrowserState(verifyUrl);
-
             if (verify.screenshotPath) {
-              const verifyAnalysis = await this._analyzeWithVision(verify.screenshotPath, 
+              const verifyAnalysis = await this._analyzeWithVision(verify.screenshotPath,
                 `Verify whether this task was ACTUALLY completed successfully: ${task.slice(0, 300)}\n` +
                 `The script CLAIMED success. Look at the screenshot and determine:\n` +
                 `1. Does the page show the expected post-task state?\n` +
                 `2. For login tasks: Is the user actually logged in (dashboard/profile visible, not login form)?\n` +
                 `3. Are there any error messages, login forms still showing, or CAPTCHA challenges?`
               );
-
               if (verifyAnalysis) {
                 console.log(`[Explorer] Verification analysis: ${verifyAnalysis.slice(0, 200)}`);
-                // Check if verification indicates the claim is FALSE
                 const failIndicators = /not\s*(actually\s*)?log(ged)?\s*in|login\s*(form|page)\s*(still|is)\s*(show|vis|display)|fail|unsuccess|error|captcha|not\s*complet/i;
                 if (failIndicators.test(verifyAnalysis)) {
                   console.log(`[Explorer] ⚠ Verification FAILED — overriding success claim`);
                   verificationOverride = {
                     status: 'recoverable',
                     diagnosis: `Post-execution verification failed. The script claimed success but independent verification shows: ${verifyAnalysis.slice(0, 500)}`,
-                    suggestion: 'The previous code falsely claimed success. The actual page state does not match the expected outcome. Fix the script to properly complete the task and verify the result before claiming success.',
+                    suggestion: 'The previous code falsely claimed success. Fix the script to properly complete the task and verify the result before claiming success.',
                     summary: `Verification failed: ${verifyAnalysis.slice(0, 200)}`,
                   };
-                  // Feed verification data into context for next attempt
                   context._visionAdvice = verifyAnalysis;
                   if (verify.html) context._pageHtml = verify.html;
                 }
@@ -500,7 +538,7 @@ Be concise and focus on what's relevant to the failed task.`;
         };
       }
 
-      // Recoverable — record error and retry (no user notification per attempt)
+      // Recoverable — record error and retry
       errorHistory.push({
         attempt,
         language: codeResult.language,
@@ -516,7 +554,7 @@ Be concise and focus on what's relevant to the failed task.`;
       console.log(`[Explorer] Recoverable error, will retry... (${reflection.diagnosis.slice(0, 80)})`);
     }
 
-    // Max retries exceeded — escalate to human (only NOW notify)
+    // Max retries exceeded
     const lastErr = errorHistory[errorHistory.length - 1];
     console.log(`[Explorer] ✗ Max retries (${this.maxRetries}) exceeded`);
     await this._notify(`❌ Explorer: Max retries (${this.maxRetries}) exceeded.\nLast error: ${lastErr?.diagnosis?.slice(0, 200) || 'unknown'}`);
@@ -978,6 +1016,8 @@ function createExplorerTool(llm, repoStore, notifyFn, sendPhotoFn) {
       if (error_context) context.errorLog = error_context;
       if (page_description) context.pageDescription = page_description;
       if (user_hints) context.userHints = user_hints;
+      // Pass sendPhotoFn so BrowserAgentLoop can send screenshots to user
+      if (sendPhotoFn) context._sendPhotoFn = sendPhotoFn;
 
       const result = await explorer.run(task, context);
 
@@ -986,16 +1026,27 @@ function createExplorerTool(llm, repoStore, notifyFn, sendPhotoFn) {
           return `[Explorer — Tool Suggestion]\n${result.result}`;
         }
 
-        // After a successful browser task, scan output for screenshot file paths
-        // and send them to the user via Telegram.
+        // After a successful task, send screenshots to user via Telegram.
+        // BrowserAgentLoop returns screenshotPath directly; code-gen path
+        // embeds paths in stdout text.
         const output = result.output || '';
         if (sendPhotoFn) {
+          const allPaths = new Set();
+
+          // Direct screenshotPath from BrowserAgentLoop
+          if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
+            allPaths.add(result.screenshotPath);
+          }
+
+          // Scan output for screenshot paths (code-gen path)
           const screenshotPaths = output.match(/(?:screenshot|image|photo|capture)\S*\s*(?:saved to|at|path)[:：]?\s*(\S+\.png)/gi) || [];
           const pathMatches = output.match(/\/\S+\.png/g) || [];
-          const allPaths = [...new Set([
-            ...screenshotPaths.map(m => { const p = m.match(/(\S+\.png)/); return p ? p[1] : null; }).filter(Boolean),
-            ...pathMatches,
-          ])];
+          for (const m of screenshotPaths) {
+            const p = m.match(/(\S+\.png)/);
+            if (p) allPaths.add(p[1]);
+          }
+          for (const p of pathMatches) allPaths.add(p);
+
           for (const imgPath of allPaths) {
             if (fs.existsSync(imgPath)) {
               console.log(`[Explorer] Sending screenshot to user: ${imgPath}`);
@@ -1039,20 +1090,23 @@ function createExplorerTool(llm, repoStore, notifyFn, sendPhotoFn) {
     }
   }, {
     name: 'explore_task',
-    description: `Launch the Explorer sub-agent to handle complex tasks through dynamic code generation and execution. The sub-agent will: Plan → Generate Code → Execute in sandbox → Self-diagnose → Retry (up to 3 times).
+    description: `Launch the Explorer sub-agent for complex tasks.
+
+For BROWSER tasks (web automation, login, scraping SPAs) it uses a ReAct loop:
+Observe page state (accessibility tree + annotated screenshot) → Think (LLM decides next step) → Act (atomic action: click, type, scroll, etc.) → Verify → repeat.
+
+For NON-BROWSER tasks (data processing, shell ops) it generates and executes code in a sandbox with up to 3 retry attempts.
 
 USE THIS TOOL WHEN:
-1. SEMANTIC GAP — No existing tool (fetch_url, web_search, run_js, run_shell, etc.) can fully handle the task. Example: "analyze all button click handlers on this webpage" or "scrape a dynamically-rendered SPA".
-2. TOOL FAILURE — A previous tool call failed with errors like SelectorNotFoundError or TimeoutError, and you need a code-level fix. Pass the error in error_context.
-3. COMPLEX REASONING — The task requires multi-step cross-page interaction, conditional logic, or dynamic data processing that cannot be achieved with a single tool call.
+1. SEMANTIC GAP — No existing tool can fully handle the task (e.g. "fill in a form and submit", "scrape a dynamically-rendered SPA").
+2. TOOL FAILURE — A previous tool call failed with SelectorNotFoundError/TimeoutError. Pass the error in error_context.
+3. COMPLEX REASONING — Multi-step cross-page interaction, conditional logic, or dynamic data processing.
 
 DO NOT USE THIS TOOL FOR:
 - Simple URL fetching (use fetch_url)
 - Basic web searches (use web_search)
 - Simple shell commands (use run_shell)
-- Simple JS evaluation (use run_js)
-
-The sub-agent can generate and run JavaScript (with Playwright), Python, or Bash scripts.`,
+- Simple JS evaluation (use run_js)`,
     schema: z.object({
       task: z.string().describe('Detailed description of the exploration task. Include specific URLs, data to extract, actions to perform, and expected output format.'),
       error_context: z.string().optional().describe('Error log from a previously failed tool call. Provide this when the exploration is triggered by a tool failure.'),

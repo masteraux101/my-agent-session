@@ -1922,7 +1922,7 @@ Available tools:
 - screenshot_page: Take a full-page screenshot of a URL, automatically send it to the user via Telegram, and return a brief AI-generated summary.
 - analyze_page_visual: Send a screenshot to the AI vision model for detailed layout analysis. Returns crop coordinates for important regions.
 - crop_image: Crop a region from an image and send it to the user via Telegram.
-- explore_task: Launch the Explorer sub-agent for complex tasks that need dynamic code generation. It will Plan → Code → Execute → Self-diagnose → Retry. Use when no existing tool fits, a tool failed, or the task requires multi-step browser automation.
+- explore_task: Launch the Explorer sub-agent for complex tasks. For browser tasks it uses a ReAct loop (Observe → Think → Act → Verify) with atomic actions, avoiding full script generation. For non-browser tasks it generates and executes custom code. Use when no existing tool fits, a tool failed, or the task requires multi-step browser automation.
 
 PAGE SCREENSHOT (when user asks to screenshot or view a URL):
 1. screenshot_page — captures the full page, sends image to user via Telegram, returns a brief summary
@@ -1954,7 +1954,7 @@ CRITICAL RULES:
 7. After successfully completing an API task, ALWAYS use save_memory to store the API endpoint, auth method, and required parameters so you can reuse them later.
 8. BEFORE starting any task, use read_memory to check if you have previously saved relevant API details or patterns. If memory has the info, USE IT — do not search the web or guess.
 9. Do NOT hallucinate API endpoints or parameters. If you don't know the correct API, fetch the documentation URL first.
-10. When a task is too complex for existing tools (multi-step web automation, dynamic scraping of SPAs, cross-page logic), or when a tool fails with errors like SelectorNotFoundError/TimeoutError, use explore_task to let the Explorer sub-agent generate and execute custom code automatically.
+10. When a task is too complex for existing tools (multi-step web automation, dynamic scraping of SPAs, cross-page logic), or when a tool fails with errors like SelectorNotFoundError/TimeoutError, use explore_task. For browser tasks it drives a real browser step-by-step with atomic actions (click, type, scroll); for non-browser tasks it generates and executes custom code.
 
 User commands (slash commands):
 - /memory clear — Clear the persistent memory file
@@ -2094,7 +2094,7 @@ Available tools (these are REAL tools you can call in the execution phase):
 - search_skills: Unified search across built-in skills and ClawHub community registry
 - load_skill: Load a skill by URL, built-in name, or ClawHub slug
 - clawhub_skill_detail: Get full details for a ClawHub skill by slug
-- explore_task: Explorer sub-agent for complex tasks needing dynamic code generation (multi-step web automation, SPA scraping, cross-page logic, or when other tools fail)
+- explore_task: Explorer sub-agent for complex tasks — uses a ReAct browser loop for web automation or code generation for non-browser tasks
 
 Classify the request:
 1. "direct" — Can be handled with the available tools above. This includes:
