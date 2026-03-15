@@ -1643,14 +1643,22 @@ CROP_REGION: {"x": <left>, "y": <top>, "width": <width>, "height": <height>}`;
 
   // ── Browser Agent tool (ReAct browser automation) ──
   if (llm) {
-    const { createBrowserTool } = require('./browser-agent');
-    tools.push(createBrowserTool(llm, notifyFn, sendTelegramPhoto));
+    try {
+      const { createBrowserTool } = require('./browser-agent');
+      tools.push(createBrowserTool(llm, notifyFn, sendTelegramPhoto));
+    } catch (e) {
+      console.warn(`[Tools] browser-agent not available: ${e.message}`);
+    }
   }
 
   // ── Explorer Sub-Agent tool (code generation & execution) ──
   if (llm) {
-    const { createExplorerTool } = require('./sub-agent');
-    tools.push(createExplorerTool(llm, repoStore, notifyFn, sendTelegramPhoto));
+    try {
+      const { createExplorerTool } = require('./sub-agent');
+      tools.push(createExplorerTool(llm, repoStore, notifyFn, sendTelegramPhoto));
+    } catch (e) {
+      console.warn(`[Tools] sub-agent not available: ${e.message}`);
+    }
   }
 
   return tools;
