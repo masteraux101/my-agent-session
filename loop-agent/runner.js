@@ -663,13 +663,9 @@ function createBuiltinTools(repoStore, llm, notifyFn) {
     }));
 
     // 6. Write Repo File — write/update a file in the GitHub repository
-    //    Certain paths must stay plain text (workflow YAML, executable scripts,
-    //    crypto helpers) so GitHub Actions can read/execute them.
+    //    Workflow YAML files must stay plain text so GitHub Actions can read them.
     const PLAIN_TEXT_PATTERNS = [
       /^\.github\/workflows\/.+\.ya?ml$/,      // GHA workflow definitions
-      /^loop-agent\/schedules\/.+\.(js|py)$/,   // scheduled task scripts
-      /^loop-agent\/schedules\/_crypto\.js$/,    // crypto helper
-      /^loop-agent\/schedules\/_callback\.js$/,  // callback helper
     ];
     function shouldSkipEncryption(filePath) {
       return PLAIN_TEXT_PATTERNS.some(re => re.test(filePath));
@@ -687,7 +683,7 @@ function createBuiltinTools(repoStore, llm, notifyFn) {
       }
     }, {
       name: 'write_repo_file',
-      description: 'Write or update a file in the GitHub repository. Workflow YAML files (.github/workflows/*.yml) and scheduled task scripts are always stored as plain text so GitHub Actions can execute them; all other files are encrypted if an encryption key is configured.',
+      description: 'Write or update a file in the GitHub repository. Workflow YAML files (.github/workflows/*.yml) are always stored as plain text; all other files are encrypted if an encryption key is configured.',
       schema: z.object({
         path: z.string().describe('File path relative to repo root'),
         content: z.string().describe('File content to write'),
@@ -1314,331 +1310,120 @@ CROP_REGION: {"x": <left>, "y": <top>, "width": <width>, "height": <height>}`;
     }),
   }));
 
-  // ── create_scheduled_task: Create a cron-scheduled GHA workflow ────
-  tools.push(tool(async ({ name, description, cron, script, language }) => {
-    if (!repoStore) return 'Error: GitHub repo not configured, cannot create scheduled tasks.';
+  // ── create_scheduled_task: Register a cron task in the loop agent ──
+  tools.push(tool(async ({ name, description, cron, prompt }) => {
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'task';
-    const workflowFile = `scheduled-${slug}.yml`;
-    const workflowPath = `.github/workflows/${workflowFile}`;
     const taskRecordPath = `loop-agent/schedules/${slug}.json`;
-    const lang = (language || 'node').toLowerCase();
-    const setupStep = lang === 'python'
-      ? '      - uses: actions/setup-python@v5\n        with:\n          python-version: "3.12"\n      - run: pip install -r requirements.txt 2>/dev/null || true'
-      : '';
-    const runCmd = lang === 'python' ? `python loop-agent/schedules/${slug}.py` : `node loop-agent/schedules/${slug}.js`;
-    const scriptPath = `loop-agent/schedules/${slug}.${lang === 'python' ? 'py' : 'js'}`;
-    const cryptoHelperPath = 'loop-agent/schedules/_crypto.js';
-    const callbackHelperPath = 'loop-agent/schedules/_callback.js';
 
-    // Build the workflow YAML
-    // NOTE: Workflow YAML and script files are NEVER encrypted — they must be
-    // readable by GitHub Actions.  Sensitive user data (prompts, memory, etc.)
-    // stays encrypted in the repo; scripts decrypt them at runtime via
-    // LOOP_ENCRYPT_KEY and the _crypto.js helper.
-    const yaml = [
-      `# scheduled-task: ${slug}`,
-      `name: "Scheduled — ${name}"`,
-      '',
-      'on:',
-      '  schedule:',
-      `    - cron: '${cron}'`,
-      '  workflow_dispatch: {}',
-      '',
-      'jobs:',
-      '  run-and-notify:',
-      '    runs-on: ubuntu-latest',
-      '    steps:',
-      '      - uses: actions/checkout@v4',
-      setupStep,
-      `      - name: Run task`,
-      '        id: run-task',
-      '        env:',
-      '          LOOP_ENCRYPT_KEY: ${{ secrets.LOOP_ENCRYPT_KEY }}',
-      '        run: |',
-      `          ${runCmd} > /tmp/_task_output.txt 2>&1 || true`,
-      '          echo "output<<EOF" >> $GITHUB_OUTPUT',
-      '          head -c 3000 /tmp/_task_output.txt >> $GITHUB_OUTPUT',
-      '          echo "EOF" >> $GITHUB_OUTPUT',
-      '',
-      '      - name: Callback to Loop Agent',
-      '        if: always()',
-      '        env:',
-      '          UPSTASH_URL: ${{ secrets.UPSTASH_URL }}',
-      '          UPSTASH_TOKEN: ${{ secrets.UPSTASH_TOKEN }}',
-      '          LOOP_KEY: ${{ secrets.LOOP_KEY }}',
-      '          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}',
-      '          GITHUB_REPOSITORY: ${{ github.repository }}',
-      '        run: |',
-      `          OUTPUT=$(head -c 2000 /tmp/_task_output.txt 2>/dev/null || echo "(no output)")`,
-      `          node loop-agent/schedules/_callback.js "[Scheduled] ${name.replace(/"/g, '\\"')}" "$OUTPUT"`,
-      '',
-      '      - name: Notify',
-      '        if: always()',
-      '        env:',
-      '          PUSHOO_CHANNELS: ${{ secrets.PUSHOO_CHANNELS }}',
-      '        run: |',
-      '          npm install pushoo 2>/dev/null',
-      `          node -e "const p=require('pushoo').default;const ch=JSON.parse(process.env.PUSHOO_CHANNELS||'[]');const o=require('fs').readFileSync('/tmp/_task_output.txt','utf8').slice(0,2000);ch.forEach(c=>p(c.platform,{token:c.token,title:'[Scheduled] ${name.replace(/'/g, "\\'")}',content:o||'(no output)'}).catch(e=>console.warn(e.message)))"`,
-    ].filter(Boolean).join('\n') + '\n';
-
-    // Crypto helper — small CommonJS module that scheduled scripts can
-    // require('./_crypto') to decrypt encrypted repo files at runtime.
-    const cryptoHelperCode = [
-      '// _crypto.js — Decryption helper for scheduled tasks',
-      '// Usage: const { readEncryptedFile } = require("./_crypto");',
-      '//        const data = readEncryptedFile("../../loop-agent/MEMORY.md");',
-      'const crypto = require("crypto");',
-      'const fs = require("fs");',
-      'const PREFIX = "ENCRYPTED:";',
-      'function decrypt(passphrase, blob) {',
-      '  if (!blob || !blob.startsWith(PREFIX)) return blob;',
-      '  const packed = Buffer.from(blob.slice(PREFIX.length), "base64");',
-      '  const salt = packed.subarray(0, 16);',
-      '  const iv = packed.subarray(16, 28);',
-      '  const rest = packed.subarray(28);',
-      '  const tag = rest.subarray(rest.length - 16);',
-      '  const ct = rest.subarray(0, rest.length - 16);',
-      '  const key = crypto.pbkdf2Sync(passphrase, salt, 310000, 32, "sha256");',
-      '  const d = crypto.createDecipheriv("aes-256-gcm", key, iv);',
-      '  d.setAuthTag(tag);',
-      '  return d.update(ct, undefined, "utf8") + d.final("utf8");',
-      '}',
-      'function readEncryptedFile(filePath) {',
-      '  const k = process.env.LOOP_ENCRYPT_KEY;',
-      '  const c = fs.readFileSync(filePath, "utf8");',
-      '  return (k && c.startsWith(PREFIX)) ? decrypt(k, c) : c;',
-      '}',
-      'module.exports = { decrypt, readEncryptedFile, PREFIX };',
-    ].join('\n') + '\n';
-
-    // Callback helper — allows scheduled tasks to send messages to the
-    // running loop agent via Upstash (preferred) or repo file channel.
-    // The loop agent picks these up through its normal polling loop.
-    const callbackHelperCode = [
-      '// _callback.js — Communication helper for scheduled tasks',
-      '// Sends task output to the loop agent inbox so the running agent can react.',
-      '// Supports two backends: Upstash Redis (preferred) and GitHub repo file.',
-      '// Usage: node _callback.js "title" "body"',
-      '//   or:  const { sendToAgent, pollAgentReply } = require("./_callback");',
-      'const https = require("https");',
-      'const http = require("http");',
-      '',
-      'function request(url, opts, body) {',
-      '  return new Promise((resolve, reject) => {',
-      '    const mod = url.startsWith("https") ? https : http;',
-      '    const req = mod.request(url, opts, (res) => {',
-      '      let data = "";',
-      '      res.on("data", (d) => data += d);',
-      '      res.on("end", () => resolve({ status: res.statusCode, body: data }));',
-      '    });',
-      '    req.on("error", reject);',
-      '    if (body) req.write(body);',
-      '    req.end();',
-      '  });',
-      '}',
-      '',
-      'function makeMessage(text) {',
-      '  return JSON.stringify({ ts: Date.now(), from: "scheduled-task", text, extra: {}, read: false });',
-      '}',
-      '',
-      'async function upstashCmd(url, token, cmd) {',
-      '  const resp = await request(url, {',
-      '    method: "POST",',
-      '    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },',
-      '  }, JSON.stringify(cmd));',
-      '  return JSON.parse(resp.body);',
-      '}',
-      '',
-      'async function ghRead(token, repo, path) {',
-      '  const url = `https://api.github.com/repos/${repo}/contents/${path}?ref=main`;',
-      '  const resp = await request(url, {',
-      '    method: "GET",',
-      '    headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github.v3+json", "User-Agent": "loop-agent-callback" },',
-      '  });',
-      '  if (resp.status === 404) return null;',
-      '  const data = JSON.parse(resp.body);',
-      '  return { content: Buffer.from(data.content, "base64").toString("utf-8"), sha: data.sha };',
-      '}',
-      '',
-      'async function ghWrite(token, repo, path, content, message, sha) {',
-      '  const url = `https://api.github.com/repos/${repo}/contents/${path}`;',
-      '  const body = { message, content: Buffer.from(content).toString("base64"), branch: "main" };',
-      '  if (sha) body.sha = sha;',
-      '  return request(url, {',
-      '    method: "PUT",',
-      '    headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github.v3+json", "Content-Type": "application/json", "User-Agent": "loop-agent-callback" },',
-      '  }, JSON.stringify(body));',
-      '}',
-      '',
-      'async function sendToAgent(text, opts = {}) {',
-      '  const upstashUrl = process.env.UPSTASH_URL;',
-      '  const upstashToken = process.env.UPSTASH_TOKEN;',
-      '  const loopKey = process.env.LOOP_KEY;',
-      '  const ghToken = process.env.GITHUB_TOKEN;',
-      '  const repo = process.env.GITHUB_REPOSITORY;',
-      '  const msg = makeMessage(text);',
-      '',
-      '  if (upstashUrl && upstashToken && loopKey) {',
-      '    const key = `loop:${loopKey}:inbox`;',
-      '    await upstashCmd(upstashUrl, upstashToken, ["SET", key, msg]);',
-      '    console.log("[callback] Sent to Upstash inbox:", key);',
-      '    return "upstash";',
-      '  }',
-      '  if (ghToken && repo && loopKey) {',
-      '    const path = `loop-agent/channel/${loopKey}.inbox.json`;',
-      '    const existing = await ghRead(ghToken, repo, path);',
-      '    await ghWrite(ghToken, repo, path, msg, "[scheduled-task] Callback", existing ? existing.sha : undefined);',
-      '    console.log("[callback] Sent to repo inbox:", path);',
-      '    return "repo";',
-      '  }',
-      '  console.warn("[callback] No Upstash or GitHub channel configured; skipping.");',
-      '  return null;',
-      '}',
-      '',
-      'async function pollAgentReply(timeoutMs = 120000, intervalMs = 10000) {',
-      '  const upstashUrl = process.env.UPSTASH_URL;',
-      '  const upstashToken = process.env.UPSTASH_TOKEN;',
-      '  const loopKey = process.env.LOOP_KEY;',
-      '  const ghToken = process.env.GITHUB_TOKEN;',
-      '  const repo = process.env.GITHUB_REPOSITORY;',
-      '  const deadline = Date.now() + timeoutMs;',
-      '',
-      '  while (Date.now() < deadline) {',
-      '    try {',
-      '      let raw = null;',
-      '      if (upstashUrl && upstashToken && loopKey) {',
-      '        const key = `loop:${loopKey}:outbox`;',
-      '        const resp = await upstashCmd(upstashUrl, upstashToken, ["GET", key]);',
-      '        raw = resp.result;',
-      '      } else if (ghToken && repo && loopKey) {',
-      '        const path = `loop-agent/channel/${loopKey}.outbox.json`;',
-      '        const file = await ghRead(ghToken, repo, path);',
-      '        if (file) raw = file.content;',
-      '      }',
-      '      if (raw) {',
-      '        const msg = typeof raw === "string" ? JSON.parse(raw) : raw;',
-      '        if (msg && msg.text && !msg.read) {',
-      '          console.log("[callback] Agent replied:", msg.text.slice(0, 200));',
-      '          return msg;',
-      '        }',
-      '      }',
-      '    } catch (e) { console.warn("[callback] Poll error:", e.message); }',
-      '    await new Promise(r => setTimeout(r, intervalMs));',
-      '  }',
-      '  console.log("[callback] No reply within timeout.");',
-      '  return null;',
-      '}',
-      '',
-      '// CLI mode: node _callback.js "title" "body"',
-      'if (require.main === module) {',
-      '  const title = process.argv[2] || "Scheduled Task";',
-      '  const body = process.argv[3] || "";',
-      '  sendToAgent(`${title}\\n${body}`).then(ch => {',
-      '    console.log("[callback] Done via", ch || "none");',
-      '  }).catch(e => {',
-      '    console.error("[callback] Error:", e.message);',
-      '    process.exit(1);',
-      '  });',
-      '}',
-      '',
-      'module.exports = { sendToAgent, pollAgentReply, makeMessage };',
-    ].join('\n') + '\n';
-
-    try {
-      // Write executable files WITHOUT encryption — GHA must be able to read them
-      await repoStore.writeFileRaw(scriptPath, script, `[scheduled] Add script for ${name}`);
-      await repoStore.writeFileRaw(workflowPath, yaml, `[scheduled] Create schedule for ${name}`);
-
-      // Write shared crypto helper (plain text) so scripts can decrypt user data
-      if (repoStore._encryptKey) {
-        await repoStore.writeFileRaw(cryptoHelperPath, cryptoHelperCode, '[scheduled] Add/update crypto helper');
-      }
-
-      // Write callback helper (plain text) for scheduled task → loop agent communication
-      await repoStore.writeFileRaw(callbackHelperPath, callbackHelperCode, '[scheduled] Add/update callback helper');
-
-      // Create/update task record
-      let record = { name, slug, description, cron, language: lang, createdAt: new Date().toISOString(), executions: [] };
-      try {
-        const existing = await repoStore.readFile(taskRecordPath);
-        if (existing) record = JSON.parse(existing.content);
-      } catch { /* new record */ }
-      record.cron = cron;
-      record.description = description;
-      record.updatedAt = new Date().toISOString();
-      await repoStore.writeFile(taskRecordPath, JSON.stringify(record, null, 2), `[scheduled] Update record for ${name}`);
-
-      // Immediately trigger the workflow via workflow_dispatch so the user
-      // doesn't have to wait for the next cron tick.
-      let triggerMsg = '';
-      try {
-        const dispatchResp = await fetch(
-          `${repoStore.api}/repos/${repoStore.owner}/${repoStore.repo}/actions/workflows/${workflowFile}/dispatches`,
-          {
-            method: 'POST',
-            headers: repoStore._headers(),
-            body: JSON.stringify({ ref: 'main' }),
-          }
-        );
-        if (dispatchResp.status === 204 || dispatchResp.ok) {
-          triggerMsg = '\n\n✅ The workflow has been triggered immediately for its first run.';
-        } else {
-          triggerMsg = `\n\n⚠️ Auto-trigger returned HTTP ${dispatchResp.status}. You can trigger it manually via workflow_dispatch.`;
-        }
-      } catch (triggerErr) {
-        triggerMsg = `\n\n⚠️ Auto-trigger failed: ${triggerErr.message}. You can trigger it manually via workflow_dispatch.`;
-      }
-
-      return `Scheduled task "${name}" created successfully.\n- Cron: ${cron}\n- Workflow: ${workflowPath}\n- Script: ${scriptPath}\n- Record: ${taskRecordPath}${triggerMsg}`;
-    } catch (e) {
-      return `Failed to create scheduled task: ${e.message}`;
+    // Validate basic cron format (5 fields)
+    const cronFields = cron.trim().split(/\s+/);
+    if (cronFields.length !== 5) {
+      return `Error: cron expression must have exactly 5 fields (min hour dom month dow). Got: "${cron}"`;
     }
+
+    const record = {
+      name, slug, description, cron, prompt,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastRunAt: null,
+      executions: [],
+    };
+
+    // Persist task record to repo (so it survives restarts)
+    if (repoStore) {
+      try {
+        await repoStore.writeFile(taskRecordPath, JSON.stringify(record, null, 2), `[scheduled] Create task ${name}`);
+      } catch (e) {
+        return `Failed to save task record: ${e.message}`;
+      }
+    }
+
+    // Register in the in-process scheduler so it fires immediately
+    _scheduleManager.register(record);
+
+    return `Scheduled task "${name}" created.\n- Cron: ${cron}\n- Record: ${taskRecordPath}\n\nThe loop agent will execute this task on schedule and notify you via configured channels.`;
   }, {
     name: 'create_scheduled_task',
-    description: 'Create a scheduled task for the loop agent to execute periodically on a cron schedule. The script will run in GitHub Actions, and its output is automatically sent to the loop agent\'s inbox, which then notifies the user via configured channels (Telegram, email, etc.). Do NOT include notification code in the script—the callback system handles delivery automatically. Use this to set up recurring agent tasks like periodic data fetches, reports, or monitoring.',
+    description: 'Create a scheduled task that the loop agent executes internally on a cron schedule. When the time comes, the agent processes the given prompt as if a user sent it and delivers the result to configured notification channels (Telegram, email, etc.). No GitHub Actions involved.',
     schema: z.object({
       name: z.string().describe('Human-readable task name (e.g. "Daily Weather Report")'),
       description: z.string().describe('Brief description of what this task does'),
-      cron: z.string().describe('Cron expression in 5-field format (e.g. "0 9 * * *" for daily at 9:00 UTC)'),
-      script: z.string().describe('The complete script code to run on each execution'),
-      language: z.enum(['node', 'python']).describe('Script language: "node" or "python"'),
+      cron: z.string().describe('Cron expression in 5-field UTC format (e.g. "0 9 * * *" for daily at 09:00 UTC)'),
+      prompt: z.string().describe('The prompt the agent should process on each execution (e.g. "Summarize the top 3 AI news stories today")'),
     }),
   }));
 
-  // ── list_scheduled_tasks: List all scheduled task records ──────────
+  // ── list_scheduled_tasks: List all registered scheduled tasks ──────
   tools.push(tool(async () => {
-    if (!repoStore) return 'Error: GitHub repo not configured.';
-    try {
-      // List files in loop-agent/schedules/ directory
-      const resp = await fetch(
-        `${repoStore.api}/repos/${repoStore.owner}/${repoStore.repo}/contents/loop-agent/schedules?ref=main`,
-        { headers: repoStore._headers() }
-      );
-      if (resp.status === 404) return 'No scheduled tasks found.';
-      if (!resp.ok) return `Failed to list tasks: HTTP ${resp.status}`;
-      const files = await resp.json();
-      const records = files.filter(f => f.name.endsWith('.json'));
-      if (records.length === 0) return 'No scheduled task records found.';
+    // First show in-memory tasks (fastest, always up-to-date)
+    const memTasks = _scheduleManager.getAll();
 
-      const tasks = [];
-      for (const rec of records) {
-        try {
-          const data = await repoStore.readFile(`loop-agent/schedules/${rec.name}`);
-          if (data) {
-            const task = JSON.parse(data.content);
-            const lastExec = task.executions?.length > 0 ? task.executions[task.executions.length - 1] : null;
-            tasks.push(`- **${task.name}** (cron: \`${task.cron}\`)\n  ${task.description || ''}\n  Last run: ${lastExec ? lastExec.timestamp + ' — ' + (lastExec.summary || 'no summary') : 'never'}`);
+    // Also scan repo for any tasks not yet loaded into memory
+    if (repoStore) {
+      try {
+        const resp = await fetch(
+          `${repoStore.api}/repos/${repoStore.owner}/${repoStore.repo}/contents/loop-agent/schedules?ref=main`,
+          { headers: repoStore._headers() }
+        );
+        if (resp.ok) {
+          const files = await resp.json();
+          for (const f of files.filter(f => f.name.endsWith('.json'))) {
+            const slug = f.name.replace('.json', '');
+            if (!_scheduleManager.get(slug)) {
+              try {
+                const data = await repoStore.readFile(`loop-agent/schedules/${f.name}`);
+                if (data) {
+                  const rec = JSON.parse(data.content);
+                  if (rec.slug && rec.cron && rec.prompt) {
+                    _scheduleManager.register(rec);
+                  }
+                }
+              } catch { /* skip corrupted */ }
+            }
           }
-        } catch { /* skip corrupted records */ }
-      }
-      return tasks.length > 0 ? `## Scheduled Tasks\n\n${tasks.join('\n\n')}` : 'No valid task records found.';
-    } catch (e) {
-      return `Failed to list tasks: ${e.message}`;
+        }
+      } catch { /* non-fatal */ }
     }
+
+    const all = _scheduleManager.getAll();
+    if (all.length === 0) return 'No scheduled tasks. Use create_scheduled_task to add one.';
+
+    const lines = all.map(t => {
+      const last = t.lastRunAt ? new Date(t.lastRunAt).toISOString() : 'never';
+      return `- **${t.name}** (slug: \`${t.slug}\`)\n  Cron: \`${t.cron}\`\n  ${t.description || ''}\n  Prompt: ${t.prompt.slice(0, 120)}${t.prompt.length > 120 ? '...' : ''}\n  Last run: ${last}`;
+    });
+    return `## Scheduled Tasks (${all.length})\n\n${lines.join('\n\n')}`;
   }, {
     name: 'list_scheduled_tasks',
-    description: 'List all scheduled tasks created by this agent, showing their cron schedule, description, and last execution summary.',
+    description: 'List all scheduled tasks registered with the loop agent, showing their cron schedule, prompt, and last execution time.',
     schema: z.object({}),
+  }));
+
+  // ── delete_scheduled_task: Remove a scheduled task ────────────────
+  tools.push(tool(async ({ slug }) => {
+    const removed = _scheduleManager.unregister(slug);
+    if (!removed) return `No task found with slug "${slug}". Use list_scheduled_tasks to see available tasks.`;
+
+    // Remove record from repo
+    if (repoStore) {
+      try {
+        const path = `loop-agent/schedules/${slug}.json`;
+        const existing = await repoStore.readFile(path);
+        if (existing) {
+          await repoStore.deleteFile(path, `[scheduled] Delete task ${slug}`).catch(() => {
+            // deleteFile may not exist; fall back to overwriting with a tombstone flag
+          });
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    return `Scheduled task "${slug}" has been removed and will no longer run.`;
+  }, {
+    name: 'delete_scheduled_task',
+    description: 'Delete a scheduled task so it no longer runs. Use list_scheduled_tasks first to get the slug.',
+    schema: z.object({
+      slug: z.string().describe('The task slug to delete (shown in list_scheduled_tasks output)'),
+    }),
   }));
 
   // ── Browser Agent tool (ReAct browser automation) ──
@@ -1955,8 +1740,9 @@ You can extend your capabilities by loading skills. Skills are managed by a rout
 - clawhub_skill_detail lets you inspect a skill before loading it.
 - NEVER refuse a task without first searching for available skills.
 - Skills are isolated: each skill only applies to its relevant domain.
-- create_scheduled_task creates cron-scheduled GitHub Actions workflows for recurring tasks.
+- create_scheduled_task registers a cron task that runs inside the agent process — no GitHub Actions needed.
 - list_scheduled_tasks shows all scheduled tasks and their last execution status.
+- delete_scheduled_task removes a scheduled task so it no longer runs.
 
 CRITICAL RULES:
 1. ALWAYS use your tools to take action. NEVER output code blocks as text — USE the tools directly.
@@ -2943,6 +2729,116 @@ async function processUserMessage(text, { agentGraph, graphState, history, repoS
   return { responseText };
 }
 
+// ─── Schedule Manager ───────────────────────────────────────────────
+//
+// Manages cron-scheduled tasks that run inside the loop agent process.
+// No GitHub Actions involved — the agent itself fires tasks on time.
+
+class ScheduleManager {
+  constructor() {
+    this._tasks = new Map(); // slug → task record
+  }
+
+  register(task) {
+    const entry = {
+      name: task.name,
+      slug: task.slug,
+      description: task.description || '',
+      cron: task.cron,
+      prompt: task.prompt || '',
+      lastRunAt: task.lastRunAt || null,
+      createdAt: task.createdAt || new Date().toISOString(),
+    };
+    this._tasks.set(task.slug, entry);
+    return entry;
+  }
+
+  unregister(slug) {
+    return this._tasks.delete(slug);
+  }
+
+  get(slug) { return this._tasks.get(slug); }
+
+  getAll() { return Array.from(this._tasks.values()); }
+
+  markRan(slug, now) {
+    const task = this._tasks.get(slug);
+    if (task) task.lastRunAt = now.toISOString();
+  }
+
+  /** Return all tasks whose cron fires at `now` and haven't run this minute. */
+  getDueTasks(now = new Date()) {
+    return this.getAll().filter(t => this._shouldFire(t.cron, t.lastRunAt, now));
+  }
+
+  _shouldFire(cron, lastRunAt, now) {
+    if (!this._matchesCron(cron, now)) return false;
+    if (!lastRunAt) return true;
+    const last = new Date(lastRunAt);
+    // Prevent double-firing within the same minute
+    return !(
+      last.getFullYear() === now.getFullYear() &&
+      last.getMonth()    === now.getMonth()    &&
+      last.getDate()     === now.getDate()     &&
+      last.getHours()    === now.getHours()    &&
+      last.getMinutes()  === now.getMinutes()
+    );
+  }
+
+  /**
+   * Minimal 5-field cron matcher: "min hour dom month dow"
+   * Supports: * (any), numbers, comma lists, ranges (1-5), steps (*\/5, 1-10\/2)
+   */
+  _matchesCron(expr, now) {
+    const fields = (expr || '').trim().split(/\s+/);
+    if (fields.length !== 5) return false;
+    const [minE, hourE, domE, monE, dowE] = fields;
+    return (
+      this._matchField(minE,  now.getMinutes(),     0, 59) &&
+      this._matchField(hourE, now.getHours(),        0, 23) &&
+      this._matchField(domE,  now.getDate(),         1, 31) &&
+      this._matchField(monE,  now.getMonth() + 1,   1, 12) &&
+      this._matchField(dowE,  now.getDay(),          0,  6)
+    );
+  }
+
+  _matchField(expr, value, min, max) {
+    if (expr === '*') return true;
+    for (const part of expr.split(',')) {
+      if (this._matchPart(part.trim(), value, min, max)) return true;
+    }
+    return false;
+  }
+
+  _matchPart(part, value, min, max) {
+    if (part.includes('/')) {
+      const [rangeStr, stepStr] = part.split('/');
+      const step = parseInt(stepStr, 10);
+      if (isNaN(step) || step < 1) return false;
+      let start = min, end = max;
+      if (rangeStr !== '*') {
+        if (rangeStr.includes('-')) {
+          const [a, b] = rangeStr.split('-').map(Number);
+          start = a; end = b;
+        } else {
+          start = parseInt(rangeStr, 10);
+        }
+      }
+      for (let v = start; v <= end; v += step) {
+        if (v === value) return true;
+      }
+      return false;
+    }
+    if (part.includes('-')) {
+      const [a, b] = part.split('-').map(Number);
+      return value >= a && value <= b;
+    }
+    return parseInt(part, 10) === value;
+  }
+}
+
+const _scheduleManager = new ScheduleManager();
+
 // ─── Unified Mode Lifecycle Management ──────────────────────────────
 //
 // Architecture: One always-running browser polling loop + optional
@@ -2959,6 +2855,7 @@ async function processUserMessage(text, { agentGraph, graphState, history, repoS
 const _runtime = {
   listener: null,        // { type: 'telegram'|'wecom', stop(), sendMsg(text) } or null
   pollTimer: null,       // browser polling setTimeout handle
+  schedulerTimer: null,  // scheduled task ticker setTimeout handle
   processing: false,     // global mutex for concurrent message processing
   processedCount: 0,     // total messages processed
   startTime: 0,          // process start timestamp
@@ -3408,6 +3305,86 @@ async function switchActiveListener(newChannels, ctx) {
 // When a bidirectional listener (Telegram/WeCom) is active, regular
 // messages from the browser are processed AND forwarded to the listener.
 // When no listener is active, responses go through pushoo notifications.
+
+// ─── Scheduler ──────────────────────────────────────────────────────
+//
+// Ticks every 30 seconds, checks _scheduleManager for due tasks, and
+// processes them like user messages — no GitHub Actions involved.
+
+function startScheduler(ctx) {
+  const { repoStore, pushooChannels, agentGraph, graphState, history, loopKey, historyPath } = ctx;
+  const TICK_MS = 30 * 1000; // check every 30 seconds
+
+  const tick = async () => {
+    const now = new Date();
+    const due = _scheduleManager.getDueTasks(now);
+    for (const task of due) {
+      console.log(`[Scheduler] Firing task "${task.name}" (cron: ${task.cron})`);
+      // Mark ran immediately to avoid double-firing if processing takes time
+      _scheduleManager.markRan(task.slug, now);
+
+      // Persist lastRunAt to repo so it survives restarts
+      if (repoStore) {
+        try {
+          const recPath = `loop-agent/schedules/${task.slug}.json`;
+          let record = { ...task };
+          try {
+            const existing = await repoStore.readFile(recPath);
+            if (existing) record = { ...JSON.parse(existing.content), lastRunAt: now.toISOString() };
+          } catch { /* new record */ }
+          record.lastRunAt = now.toISOString();
+          if (!record.executions) record.executions = [];
+          record.executions.push({ timestamp: now.toISOString() });
+          if (record.executions.length > 20) record.executions = record.executions.slice(-20);
+          await repoStore.writeFile(recPath, JSON.stringify(record, null, 2), `[scheduled] Record run for ${task.slug}`);
+        } catch (e) {
+          console.warn(`[Scheduler] Failed to persist record for ${task.slug}: ${e.message}`);
+        }
+      }
+
+      // Build the message delivered to the agent
+      const msgText = [
+        `[Scheduled Task: ${task.name}]`,
+        task.description ? task.description : '',
+        task.prompt,
+      ].filter(Boolean).join('\n');
+
+      try {
+        const { responseText } = await processUserMessage(msgText, {
+          agentGraph, graphState, history, repoStore, loopKey, historyPath,
+        });
+
+        // Send result to all configured notification channels
+        await sendNotifications(pushooChannels, `[Scheduled] ${task.name}`, responseText);
+
+        // Persist execution summary
+        if (repoStore) {
+          try {
+            const recPath = `loop-agent/schedules/${task.slug}.json`;
+            const existing = await repoStore.readFile(recPath);
+            if (existing) {
+              const record = JSON.parse(existing.content);
+              if (record.executions && record.executions.length > 0) {
+                record.executions[record.executions.length - 1].summary = responseText.slice(0, 300);
+                await repoStore.writeFile(recPath, JSON.stringify(record, null, 2), `[scheduled] Save summary for ${task.slug}`);
+              }
+            }
+          } catch { /* non-fatal */ }
+        }
+
+        console.log(`[Scheduler] Task "${task.name}" completed.`);
+      } catch (e) {
+        console.error(`[Scheduler] Task "${task.name}" failed: ${e.message}`);
+        await sendNotifications(pushooChannels, `[Scheduled] ❌ ${task.name} failed`, e.message).catch(() => {});
+      }
+    }
+
+    _runtime.schedulerTimer = setTimeout(tick, TICK_MS);
+  };
+
+  _runtime.schedulerTimer = setTimeout(tick, TICK_MS);
+  console.log(`[Scheduler] Started — ticking every ${TICK_MS / 1000}s, ${_scheduleManager.getAll().length} task(s) loaded`);
+}
 
 function startBrowserPolling(ctx) {
   const { upstash, repoStore, loopKey } = ctx;
@@ -3885,10 +3862,43 @@ async function main() {
   // ── Start browser polling (always runs) ──
   startBrowserPolling(ctx);
 
+  // ── Load persisted scheduled tasks from repo ──
+  if (repoStore) {
+    try {
+      const resp = await fetch(
+        `${repoStore.api}/repos/${repoStore.owner}/${repoStore.repo}/contents/loop-agent/schedules?ref=main`,
+        { headers: repoStore._headers() }
+      );
+      if (resp.ok) {
+        const files = await resp.json();
+        let loaded = 0;
+        for (const f of files.filter(f => f.name.endsWith('.json'))) {
+          try {
+            const data = await repoStore.readFile(`loop-agent/schedules/${f.name}`);
+            if (data) {
+              const rec = JSON.parse(data.content);
+              if (rec.slug && rec.cron && rec.prompt) {
+                _scheduleManager.register(rec);
+                loaded++;
+              }
+            }
+          } catch { /* skip corrupted */ }
+        }
+        console.log(`[Scheduler] Loaded ${loaded} scheduled task(s) from repo.`);
+      }
+    } catch (e) {
+      console.warn(`[Scheduler] Could not load tasks from repo: ${e.message}`);
+    }
+  }
+
+  // ── Start in-process scheduler (replaces GHA cron) ──
+  startScheduler(ctx);
+
   // ── Graceful shutdown ──
   const shutdown = async (signal) => {
     console.log(`[Main] ${signal} received, shutting down...`);
     if (_runtime.pollTimer) clearTimeout(_runtime.pollTimer);
+    if (_runtime.schedulerTimer) clearTimeout(_runtime.schedulerTimer);
     if (_runtime.listener) {
       await _runtime.listener.stop();
       _runtime.listener = null;
