@@ -1,0 +1,40 @@
+# browseragent-loop: loop-837e22b8
+name: "Loop Agent — loop-837e22b8"
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  loop-agent:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.50.0-noble
+      options: --ipc=host
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          cd loop-agent
+          npm install pushoo telegraf @wecom/aibot-node-sdk zod @langchain/core @langchain/langgraph @langchain/google-genai @langchain/openai playwright@1.50.0 sharp 2>&1
+
+      - name: Run loop agent
+        env:
+          UPSTASH_URL: ${{ secrets.UPSTASH_URL }}
+          UPSTASH_TOKEN: ${{ secrets.UPSTASH_TOKEN }}
+          LOOP_KEY: "loop-837e22b8"
+          AI_PROVIDER: "openai"
+          AI_MODEL: "glm-4.6v"
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+          PUSHOO_CHANNELS: ${{ secrets.PUSHOO_CHANNELS }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LOOP_DATA_REPOSITORY: "masteraux101/my-agent-session-loop-private"
+          LOOP_WORKFLOW_FILE: "loop-agent-1773893492522.yml"
+          LOOP_HISTORY_PATH: "loop-agent/history"
+          LOOP_POLL_INTERVAL: "5"
+          LOOP_MAX_RUNTIME: "18000"
+        run: node loop-agent/runner.js
+
