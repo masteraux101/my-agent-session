@@ -18,5 +18,15 @@
     "role": "assistant",
     "content": "我是一个大型语言模型，由 Google 训练。",
     "ts": 1774075036839
+  },
+  {
+    "role": "user",
+    "content": "帮我登陆hissr.co",
+    "ts": 1774075182060
+  },
+  {
+    "role": "assistant",
+    "content": "好的，我很乐意帮助您登录 hissr.co。\n\n请问您的用户名和密码是什么？",
+    "ts": 1774075196834
   }
 ]
